@@ -1,0 +1,28 @@
+[
+ {
+  "desk_access": 1,
+  "disabled": 0,
+  "docstatus": 0,
+  "doctype": "Role",
+  "home_page": null,
+  "is_custom": 0,
+  "modified": "2026-07-14 17:15:46.833332",
+  "name": "Docapture Uploader",
+  "restrict_to_domain": null,
+  "role_name": "Docapture Uploader",
+  "two_factor_auth": 0
+ },
+ {
+  "desk_access": 1,
+  "disabled": 0,
+  "docstatus": 0,
+  "doctype": "Role",
+  "home_page": null,
+  "is_custom": 0,
+  "modified": "2026-07-14 17:15:47.155439",
+  "name": "Docapture Reviewer",
+  "restrict_to_domain": null,
+  "role_name": "Docapture Reviewer",
+  "two_factor_auth": 0
+ }
+]

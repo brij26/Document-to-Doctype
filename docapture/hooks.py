@@ -85,8 +85,7 @@ app_license = "mit"
 # Installation
 # ------------
 
-# before_install = "docapture.install.before_install"
-# after_install = "docapture.install.after_install"
+after_install = "docapture.install.after_install"
 
 # Uninstallation
 # ------------
@@ -250,6 +249,13 @@ app_license = "mit"
 # default_log_clearing_doctypes = {
 # 	"Logging DocType Name": 30  # days to retain logs
 # }
+
+# Fixtures
+# --------
+
+fixtures = [
+	{"dt": "Role", "filters": [["role_name", "in", ["Docapture Uploader", "Docapture Reviewer"]]]},
+]
 
 # Translation
 # ------------
