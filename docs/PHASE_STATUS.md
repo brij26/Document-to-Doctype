@@ -12,7 +12,7 @@ Only set a phase to `Approved` after **explicit user sign-off** (see `CLAUDE.md`
 |---|---|---|
 | 0 | Scaffold | Approved |
 | 1 | Capture doctype + upload + status | Approved |
-| 2 | OCR layer (`ocr/*`) | Awaiting Review |
+| 2 | OCR layer (`ocr/*`) | Approved |
 | 3 | Mapper / LLM layer (`mappers/*`) | Not Started |
 | 4 | Review queue + draft creation | Not Started |
 | 5+ | Future (Should / Nice-to-Have) | Not Started |
@@ -21,9 +21,10 @@ Only set a phase to `Approved` after **explicit user sign-off** (see `CLAUDE.md`
 
 ## Current focus
 
-**Phase 2 — Awaiting Review.** OCR layer (`ocr/*`) built: `OCREngine` protocol,
+**Phase 2 — Approved.** OCR layer (`ocr/*`) built: `OCREngine` protocol,
 `pymupdf_extractor`, `preprocess`, `paddle_engine`, `tesseract_engine`, and the
-`frappe.enqueue` job writing `raw_ocr_json`.
+`frappe.enqueue` job writing `raw_ocr_json`. Phase 3 not started — awaiting
+explicit go-ahead.
 
 ## Log
 
@@ -171,3 +172,41 @@ Only set a phase to `Approved` after **explicit user sign-off** (see `CLAUDE.md`
   **Open follow-up, not yet scheduled:** decide how to detect "this was actually
   photographed" (checkbox field vs. EXIF) before re-enabling `use_doc_unwarping`
   for anyone.
+- 2026-07-16 (follow-up 4): discussed what should happen on an unsupported
+  upload (e.g. `.txt`) — traced it to an async `Failed` status with a raw
+  Python traceback (`cv2.imdecode` returns `None`, `.shape` on `None` raises).
+  Decided to reject at upload time instead. `captured_document.py` (Phase 1,
+  already `Approved`) gets a new `ALLOWED_EXTENSIONS` set and
+  `check_file_type()`, called first in `validate()` (before the existing
+  `content_hash`/duplicate check — fail fast without reading the whole file).
+  Knock-on: Phase 1's own `test_captured_document.py` used placeholder text
+  content named `.txt` for its dedup/status-walk tests — now rejected by the
+  new check, and simply renaming to `.pdf`/`.jpg` wasn't enough either, since
+  Frappe's own File doctype validates real PDF/image structure at attach time
+  (`pdf_contains_js`, `strip_exif_data` — same class of issue hit earlier with
+  `test_pipeline.py`'s corrupt-file test). Fixed by using real fixture bytes
+  (`Sales order.pdf`/`input.jpg`) instead of placeholder text, salted per test
+  method (`frappe.generate_hash`) so re-running the suite doesn't collide with
+  a leftover row from a previous invocation — tests here aren't transactionally
+  rolled back, confirmed by hitting exactly that collision mid-fix. Added
+  `test_unsupported_file_type_rejected`. `run-tests --app docapture` (30/30,
+  confirmed stable across two consecutive runs) and `ruff check` both clean.
+- 2026-07-16 (follow-up 5): server-side `check_file_type()` only rejects on
+  save — by then the browser has already uploaded the raw file and put the
+  Attach widget into its "attached" state (Reload File/Clear buttons), which
+  stayed stuck showing those for a file that was never actually saved. Traced
+  Frappe's Attach control (`attach.js`) and its uploader (`FileUploader.vue`):
+  the docfield's `options.restrictions.allowed_file_types` is checked
+  client-side *before* any upload starts, using the same extension-list format
+  as our Python `ALLOWED_EXTENSIONS`. Added a `refresh(frm)` handler in
+  `captured_document.js` (previously empty boilerplate) setting that
+  restriction via `frm.set_df_property("file", "options", {...})` — an
+  unsupported file is now filtered out before it's ever uploaded (Frappe's own
+  orange "skipped, invalid file type" alert), so the field never leaves its
+  plain "Attach" state. Server-side `check_file_type()` unchanged, kept as
+  defense-in-depth for uploads that bypass the browser (API/REST). Pure
+  client-side change — no Python/test changes; not exercised by
+  `bench run-tests`, verification is manual-in-browser (see
+  `docs/manual_test/phase-2-ocr-layer.md` if adding a case there).
+- 2026-07-16: user signed off. Phase 2 → Approved. Phase 3 not started —
+  will not begin until the user explicitly says go.

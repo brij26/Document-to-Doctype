@@ -137,13 +137,11 @@ after_install = "docapture.install.after_install"
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+doc_events = {
+	"Captured Document": {
+		"after_insert": "docapture.ocr.pipeline.enqueue_ocr",
+	},
+}
 
 # Scheduled Tasks
 # ---------------

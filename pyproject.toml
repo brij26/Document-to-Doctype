@@ -10,9 +10,10 @@ dynamic = ["version"]
 dependencies = [
     # "frappe~=16.0.0" # Installed and managed by bench.
     "pymupdf",
-    "paddleocr",
+    "paddleocr==3.7.0",
+    "onnxruntime==1.27.0",
     "pytesseract",
-    "opencv-python-headless",
+    "opencv-contrib-python==4.10.0.84",
     "pillow",
     "rapidfuzz",
 ]

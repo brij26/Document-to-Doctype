@@ -1,6 +1,8 @@
 # Copyright (c) 2026, Frappe Bench and Contributors
 # See license.txt
 
+from pathlib import Path
+
 import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils.file_manager import save_file
@@ -14,9 +16,17 @@ EXTRA_TEST_RECORD_DEPENDENCIES = []  # eg. ["User"]
 # company/currency fields, so skip pulling that chain in.
 IGNORE_TEST_RECORD_DEPENDENCIES = ["Company"]
 
+FIXTURE_DIR = Path(frappe.get_app_path("docapture")).parent / "tests/fixtures/ocr/sales_order_page1"
+SAMPLE_PDF = (FIXTURE_DIR / "Sales order.pdf").read_bytes()
+SAMPLE_JPG = (FIXTURE_DIR / "input.jpg").read_bytes()
 
-def attach(dn, content):
-	file_doc = save_file(f"{dn}.txt", content, "Captured Document", dn, is_private=1)
+
+def attach(dn, content, extension="pdf"):
+	# Since check_file_type() validates the extension and Frappe's own File doctype
+	# validates real PDF/image structure at attach time (pdf_contains_js,
+	# strip_exif_data), placeholder text can no longer stand in for file content —
+	# content must be genuinely valid bytes for whichever extension is used.
+	file_doc = save_file(f"{dn}.{extension}", content, "Captured Document", dn, is_private=1)
 	return file_doc.file_url
 
 
@@ -27,10 +37,15 @@ class IntegrationTestCapturedDocument(IntegrationTestCase):
 	"""
 
 	def test_status_walk_and_duplicate_detection(self):
+		# Salted per test run (not per dn): these two docs must share a content_hash
+		# to exercise the duplicate check, but the shared content must still be
+		# unique across runs, or it collides with a leftover row from a previous
+		# `bench run-tests` invocation (tests here aren't transactionally rolled back).
+		content = SAMPLE_PDF + frappe.generate_hash(length=8).encode()
 		doc = frappe.get_doc(
 			{
 				"doctype": "Captured Document",
-				"file": attach("test-cap-1", b"sample invoice content"),
+				"file": attach("test-cap-1", content),
 				"source_type": "Payment Receipt",
 			}
 		).insert()
@@ -47,17 +62,18 @@ class IntegrationTestCapturedDocument(IntegrationTestCase):
 		duplicate = frappe.get_doc(
 			{
 				"doctype": "Captured Document",
-				"file": attach("test-cap-2", b"sample invoice content"),
+				"file": attach("test-cap-2", content),
 				"source_type": "Payment Receipt",
 			}
 		)
 		self.assertRaises(frappe.DuplicateEntryError, duplicate.insert)
 
 	def test_reupload_allowed_after_rejection(self):
+		content = SAMPLE_JPG + frappe.generate_hash(length=8).encode()
 		rejected = frappe.get_doc(
 			{
 				"doctype": "Captured Document",
-				"file": attach("test-cap-3", b"rejected invoice content"),
+				"file": attach("test-cap-3", content, extension="jpg"),
 				"source_type": "Payment Receipt",
 			}
 		).insert()
@@ -67,9 +83,21 @@ class IntegrationTestCapturedDocument(IntegrationTestCase):
 		reupload = frappe.get_doc(
 			{
 				"doctype": "Captured Document",
-				"file": attach("test-cap-4", b"rejected invoice content"),
+				"file": attach("test-cap-4", content, extension="jpg"),
 				"source_type": "Payment Receipt",
 			}
 		).insert()
 
 		self.assertEqual(reupload.content_hash, rejected.content_hash)
+
+	def test_unsupported_file_type_rejected(self):
+		doc = frappe.get_doc(
+			{
+				"doctype": "Captured Document",
+				"file": attach("test-cap-5", b"not a real document", extension="txt"),
+				"source_type": "Payment Receipt",
+			}
+		)
+		with self.assertRaises(frappe.ValidationError) as context:
+			doc.insert()
+		self.assertIn(".txt", str(context.exception))

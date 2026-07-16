@@ -2,17 +2,33 @@
 # For license information, please see license.txt
 
 import hashlib
+from pathlib import Path
 
 import frappe
 from frappe import _
 from frappe.model.document import Document
 from frappe.utils.file_manager import get_file
 
+# Matches what docapture/ocr/pipeline.py handles: .pdf via the native pymupdf path,
+# the rest via cv2.imdecode.
+ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
+
 
 class CapturedDocument(Document):
 	def validate(self):
+		self.check_file_type()
 		self.set_content_hash()
 		self.check_duplicate()
+
+	def check_file_type(self):
+		if not self.file:
+			return
+		extension = Path(self.file).suffix.lower()
+		if extension not in ALLOWED_EXTENSIONS:
+			frappe.throw(
+				_("Unsupported file type {0}. Supported: PDF, JPG, PNG, TIFF, BMP.").format(extension),
+				frappe.ValidationError,
+			)
 
 	def set_content_hash(self):
 		if not self.file:

@@ -31,11 +31,23 @@
       real bug where every raster page silently fell back to tesseract;
       confirm the fix holds).
 
-### Failure path
-- [ ] Attach a corrupt or unsupported file (e.g. a renamed empty file) → job
-      runs, status moves to `Failed`, `error_log` is populated with a useful
-      message, and a corresponding `frappe.log_error` entry exists (Desk →
-      Error Log).
+### Unsupported file type — rejected at upload, not async
+- [ ] On a new `Captured Document`, click Attach and try to pick a `.txt` file
+      — confirm the OS file-picker either filters it out, or (drag-drop /
+      "all files" override) Frappe's own orange "skipped, invalid file type"
+      alert appears and the field stays a plain **Attach** button — no
+      **Reload File**/**Clear** buttons should ever appear for a rejected file.
+- [ ] If the client-side restriction is somehow bypassed (or testing directly
+      via the API): confirm `captured_document.py`'s `check_file_type()`
+      still rejects it on save with a clear "Unsupported file type" message,
+      naming the extension, before any OCR job is enqueued.
+
+### Failure path (corrupt file of a *supported* type)
+- [ ] Attach a corrupt file with an allowed extension (e.g. a `.pdf` renamed
+      from an empty/garbage file, so it passes the extension check but isn't
+      a real PDF) → save succeeds, job runs, status moves to `Failed`,
+      `error_log` is populated with a useful message, and a corresponding
+      `frappe.log_error` entry exists (Desk → Error Log).
 
 ### raw_ocr_json shape spot-check
 - [ ] For either fixture's result, confirm the JSON structure is
@@ -53,9 +65,10 @@
 
 ## Expected result
 Both fixture types reach `OCR Done` with correctly shaped `raw_ocr_json`, the
-scanned image is processed by PaddleOCR (not tesseract), failures land in
-`Failed` with a visible error, and the phone-photo real-world gap is
-explicitly called out if untested.
+scanned image is processed by PaddleOCR (not tesseract), an unsupported file
+type is rejected before it ever uploads (not left `Failed` async), a corrupt
+file of a supported type still lands in `Failed` with a visible error, and the
+phone-photo real-world gap is explicitly called out if untested.
 
 ## Out of scope
 No interpretation of the OCR text (classification, field extraction,
