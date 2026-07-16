@@ -11,17 +11,26 @@ Tesseract-specific issues belong to `tesseract_engine.py` and are out of
 scope here.
 
 Known-good baseline, confirmed working (see
-`docs/OCR_MODEL_EVALUATION.md` for full context):
+`docs/OCR_MODEL_EVALUATION.md` for full context — including why
+`paddlepaddle` is NOT part of this install, and the historical
+`paddlepaddle`-based version kept there for reference only):
 
 ```
-paddlepaddle==3.2.0
-paddleocr==3.3.3
+paddleocr        # version TBD — not yet pinned, see OCR_MODEL_EVALUATION.md
+onnxruntime      # version TBD — not yet pinned, see OCR_MODEL_EVALUATION.md
 ```
+
+**No `paddlepaddle` install.** Bench's venv is pinned to Python 3.14 by
+Frappe, and `paddlepaddle` has no `cp314` wheel — the engine is ONNX
+Runtime instead, which does support `cp314`.
 
 ```python
 from paddleocr import PaddleOCR
 
 ocr = PaddleOCR(
+    text_detection_model_name="PP-OCRv6_medium_det",
+    text_recognition_model_name="PP-OCRv6_medium_rec",
+    engine="onnxruntime",
     use_doc_orientation_classify=False,
     use_doc_unwarping=False,
     use_textline_orientation=False,
@@ -39,7 +48,12 @@ these exact pinned versions? Version drift is the single most common cause
 of PaddleOCR breakage — check before going deeper.
 
 ```bash
-pip show paddlepaddle paddleocr
+pip show paddleocr onnxruntime
+# paddlepaddle should NOT be listed here — if it is, that's worth
+# investigating on its own (see install_errors.md), since it means
+# something pulled it in despite it not being part of this project's
+# supported install path.
+pip show paddlepaddle 2>&1 | head -1
 ```
 
 ## Step 1 — classify the error

@@ -25,12 +25,13 @@ text_word_boxes: [[32,26,83,54], [92,26,97,54], [102,26,139,54]]
   constructor call that's executing — a common mistake is setting it on a
   different instantiation than the one actually used (e.g., a cached/module-
   level instance created before the flag was added).
-- Per the working reference config's own comment, `return_word_box` is
-  confirmed supported on the **default `paddle_static` engine**. If the
-  code has been changed to use a different `engine=` value (e.g.
-  `"transformers"`, seen in some PaddleOCR model-card examples for GPU/HF
-  deployment), word-box support has NOT been verified for that engine in
-  this project — don't assume it carries over silently.
+- `return_word_box` is confirmed working with **`engine="onnxruntime"`** —
+  this is the current project setup (see `docs/OCR_MODEL_EVALUATION.md`),
+  verified to produce correctly-shaped `text_word`/`text_word_boxes` with
+  the same tokenization behavior as the historical `paddle_static`-engine
+  run. If `engine=` gets changed to something else (`"paddle"`,
+  `"transformers"`), word-box support has NOT been verified for that engine
+  in this project — don't assume it carries over silently, re-verify.
 
 ## Whitespace/punctuation tokens polluting downstream mapping
 
@@ -64,7 +65,9 @@ model:
   before PaddleOCR saw the image — a skipped or failed preprocessing step
   (bad orientation correction, no deskew) will tank recognition confidence
   even with a good model.
-- Note: the known-good 0.9984 average confidence was measured on a clean,
+- Note: the known-good confidence range is avg ~0.996–0.998 depending on
+  engine (`onnxruntime` vs. the historical `paddle_static` reference — see
+  `docs/OCR_MODEL_EVALUATION.md`), measured on a clean,
   born-digital source document. Don't treat a lower score on a genuine
   phone-photo/scanned fixture as automatically a bug — see the validation
   gap noted in `docs/OCR_MODEL_EVALUATION.md`.

@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat /home/brij/frappe/frappe-bench/docs/PHASE_STATUS.md"
+          }
+        ]
+      }
+    ]
+  }
+}

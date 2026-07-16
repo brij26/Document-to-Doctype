@@ -1,39 +1,62 @@
 # Install / import errors
 
+# Install / import errors
+
+## Current known-good install (ONNX Runtime engine, no `paddlepaddle`)
+
+**Read this first.** As of the latest validation in `docs/OCR_MODEL_EVALUATION.md`,
+this project does **not** install `paddlepaddle` at all — bench's venv is
+pinned to Python 3.14 by Frappe, and `paddlepaddle` ships no `cp314` wheel
+for any version. The working install is:
+
+```bash
+pip install paddleocr onnxruntime
+```
+
+with the pipeline constructed as:
+
+```python
+ocr = PaddleOCR(
+    text_detection_model_name="PP-OCRv6_medium_det",
+    text_recognition_model_name="PP-OCRv6_medium_rec",
+    engine="onnxruntime",
+    ...
+)
+```
+
+This works because `paddleocr`'s own `pyproject.toml` does not declare
+`paddlepaddle` as a dependency — the inference engine (`paddle` /
+`transformers` / `onnxruntime`) is an intentionally separate install, and
+`onnxruntime` has `cp314` wheels where `paddlepaddle` does not.
+
+**TODO:** both `paddleocr` and `onnxruntime` are still unpinned as of the
+last validated run — pin exact versions here and in `OCR_MODEL_EVALUATION.md`
+once bench-venv confirmation (see that doc's Status section) is done, then
+update this section with the pinned versions.
+
+**If `paddlepaddle` somehow ends up installed anyway** (e.g. someone follows
+an old instruction, or a dependency chain pulls it in unexpectedly),
+recheck immediately — that's a regression back into the Python 3.14 blocker,
+not a harmless extra package. `pip show paddlepaddle` should return nothing
+in a correctly set up bench venv for this project.
+
 ## `ModuleNotFoundError: No module named 'paddle'`
 
-The most common PaddleOCR error by far. `paddleocr` imports `paddle`
-(from the separate `paddlepaddle` package) at import time — if `paddlepaddle`
-didn't actually install (or installed into a different environment/venv
-than the one running the script), this is what you get.
+**Do not "fix" this by installing `paddlepaddle`** — on this project's bench
+venv (Python 3.14), that install will fail outright (no `cp314` wheel
+exists), and even if it somehow succeeded, `paddlepaddle` is not part of
+the current supported path here (see above). If you see this error, first
+check whether the code is passing `engine="onnxruntime"` — this error
+usually means something is trying to use the `paddle` engine by default
+(e.g. `engine=` was left unset, or an old code path/example was copied that
+predates the ONNX Runtime switch). Fix the `engine=` argument, don't chase
+a `paddlepaddle` install.
 
-Causes, in order of likelihood:
-1. **`paddlepaddle` install silently failed or was skipped.**
-   `paddleocr` imports `paddle` (from the separate `paddlepaddle` package) at
-   import time. If `paddlepaddle` didn't install successfully (or was installed
-   into a different environment/venv than the one running the script), you'll
-   get this error.
-
-   The confirmed-working installation used during testing is:
-
-   ```bash
-   pip install paddlepaddle==3.2.0
-   pip install paddleocr==3.7.0
-   ```
-
-   Ensure both packages are installed in the same Python environment.
-2. **Wrong environment.** Script run outside the venv `paddlepaddle` was
-   installed into. In this project specifically: bench uses its own venv
-   (no `uv`/`.venv` — see `CLAUDE.md`), so check the job/worker process is
-   actually using bench's venv Python, not a system Python or a stray venv.
-   `which python` / `python -c "import paddle; print(paddle.__file__)"`
-   inside the exact process context that's failing.
-3. **Platform/CUDA mismatch wheel.** `paddlepaddle` ships different wheels
-   per OS/CPU/GPU/CUDA version. Installing the wrong one can silently
-   produce an unimportable package on some platforms. If on Linux CPU-only
-   (the expected case for a bench server), use the plain
-   `pip install paddlepaddle==3.2.0` — don't reach for a GPU/CUDA-specific
-   index URL unless the target actually has a supported GPU.
+This error is only actually expected/relevant if deliberately testing the
+historical `engine="paddle"` path documented as a fallback reference in
+`OCR_MODEL_EVALUATION.md` — and that path cannot run in bench's venv at all,
+only in an external environment with a compatible Python version (see that
+doc for context).
 
 ## Dependency resolution conflicts (scikit-image, opencv-python, numpy pins)
 
@@ -42,38 +65,26 @@ python` versions that can conflict with other packages already in
 `pyproject.toml` (this project also declares `opencv-python-headless`,
 `pillow`, `pymupdf` — watch for opencv package conflicts specifically:
 `opencv-python` vs `opencv-python-headless` vs `opencv-contrib-python` are
-mutually incompatible if more than one ends up installed).
+mutually incompatible if more than one ends up installed). This applies
+regardless of which inference engine is in use — it's a `paddleocr`/opencv
+conflict, not a `paddlepaddle`-specific one.
 
-Fix: pin `paddleocr==3.7.0` explicitly (not a floating `>=`) together with `paddlepaddle==3.2.0` as already
-recorded in `docs/OCR_MODEL_EVALUATION.md`, and if a conflict error names a
-specific opencv variant, check `pyproject.toml`/`requirements.txt` for a
-duplicate opencv declaration before changing paddleocr's version.
+Fix: pin `paddleocr` to an exact version (see TODO above — not yet pinned)
+rather than a floating `>=`, and if a conflict error names a specific opencv
+variant, check `pyproject.toml`/`requirements.txt` for a duplicate opencv
+declaration before changing `paddleocr`'s version.
 
 ## `pip install` fails outright / `ResolutionImpossible`
 
-Usually means an unpinned or too-old `paddleocr` version is being resolved
-against an incompatible Python version. Confirm the target Python version
-bench's venv is running, and use the exact pins
-(`paddlepaddle==3.2.0` and `paddleocr==3.7.0`) rather than an unpinned install —
-this project already validated that combination.
+If this happens on `pip install paddleocr onnxruntime` specifically inside
+bench's venv, don't assume it's the same Python-3.14 wheel problem that
+blocked the `paddlepaddle` path — `onnxruntime` does have `cp314` wheels, so
+a resolution failure here has a different root cause. Check:
+1. Whether something in `pyproject.toml`/`requirements.txt` is pinning a
+   conflicting version of a shared dependency (`numpy`, `PyYAML`,
+   `requests`, `typing-extensions` — all declared by `paddleocr` itself per
+   its `pyproject.toml`).
+2. Whether `paddlex[ocr-core]` (a `paddleocr` dependency) is pulling in
+   something unexpected — inspect the actual resolved dependency tree
+   (`pip install --dry-run` or `pip show paddlex`) rather than guessing.
 
-
-## `NotImplementedError: ConvertPirAttribute2RuntimeAttribute`
-
-Example:
-
-```
-NotImplementedError:
-ConvertPirAttribute2RuntimeAttribute not support
-[pir::ArrayAttribute<pir::DoubleAttribute>]
-```
-
-Observed while running PP-OCRv6 on Google Colab CPU.
-
-Notes:
-- The error occurs inside PaddlePaddle's inference runtime (`predictor.run()`),
-  before OCR inference begins.
-- It is not caused by the input image.
-- It also reproduces with PaddleOCR's official demo image.
-- If encountered, first verify the runtime (CPU vs GPU) and PaddlePaddle /
-  PaddleOCR version compatibility before debugging application code.

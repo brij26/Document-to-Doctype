@@ -8,8 +8,9 @@ itself is probably fine — look at the bench-specific context first.
 
 1. **Confirm it's actually bench's venv running the job.** Per `CLAUDE.md`,
    this project uses bench's own venv (no `uv`/`.venv`) with deps declared
-   in `pyproject.toml`/`requirements.txt`. Confirm `paddlepaddle==3.2.0` and
-   `paddleocr==3.3.3` are actually installed into *that* venv, not a
+   in `pyproject.toml`/`requirements.txt`. Confirm `paddleocr` and
+   `onnxruntime` (NOT `paddlepaddle` — not part of this project's install,
+   see `install_errors.md`) are actually installed into *that* venv, not a
    separate one used for ad-hoc testing.
 
 2. **Working directory / relative paths.** The reference script used an

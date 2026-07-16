@@ -29,11 +29,15 @@ another model load and another possible device mismatch. If a device error
 appears after changing these flags, that's the first thing to revert and
 re-test in isolation.
 
-For CPU-only bench deployment (the expected default), don't pass a
-`device="gpu"` kwarg unless the target machine actually has a supported
-GPU + CUDA + matching `paddlepaddle` GPU wheel installed. A CPU-only
-`paddlepaddle` install (as installed via the plain `pip install
-paddlepaddle==3.2.0`) will error if code asks it for a GPU device.
+For CPU-only bench deployment (the expected default) with the current
+`engine="onnxruntime"` setup, don't pass a `device="gpu"` kwarg unless the
+target machine actually has a supported GPU and `onnxruntime-gpu` (not
+plain `onnxruntime`) installed — plain `onnxruntime` is CPU-only and will
+error if asked for a GPU device.
+
+(This section previously discussed `paddlepaddle` GPU wheels — not
+applicable anymore, since `paddlepaddle` isn't part of this project's
+install at all. See `install_errors.md` for why.)
 
 ## Memory errors / OOM inside a worker process
 
