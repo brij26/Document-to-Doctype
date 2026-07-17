@@ -23,7 +23,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Entity Type",
-   "options": "Company\nSupplier\nAccount\nBank Account\nMode of Payment\nCurrency",
+   "options": "Company\nCustomer\nSupplier\nAccount\nBank Account\nMode of Payment\nCurrency",
    "reqd": 1
   },
   {

@@ -19,6 +19,9 @@ IGNORE_TEST_RECORD_DEPENDENCIES = ["Company"]
 FIXTURE_DIR = Path(frappe.get_app_path("docapture")).parent / "tests/fixtures/ocr/sales_order_page1"
 SAMPLE_PDF = (FIXTURE_DIR / "Sales order.pdf").read_bytes()
 SAMPLE_JPG = (FIXTURE_DIR / "input.jpg").read_bytes()
+SAMPLE_WEBP = (
+	Path(frappe.get_app_path("docapture")).parent / "tests/fixtures/mappers/sample_payment_reciept.webp"
+).read_bytes()
 
 
 def attach(dn, content, extension="pdf"):
@@ -89,6 +92,22 @@ class IntegrationTestCapturedDocument(IntegrationTestCase):
 		).insert()
 
 		self.assertEqual(reupload.content_hash, rejected.content_hash)
+
+	def test_webp_upload_accepted(self):
+		# .webp joined ALLOWED_EXTENSIONS once tests/fixtures/mappers/*.webp
+		# proved the rest of the ingestion path already handles it (see
+		# docs/PHASE_3_MAPPER_PLAN.md). This is the attach-time half of that
+		# guarantee; docapture.ocr.test_pipeline covers the OCR half.
+		doc = frappe.get_doc(
+			{
+				"doctype": "Captured Document",
+				"file": attach("test-cap-webp", SAMPLE_WEBP, extension="webp"),
+				"source_type": "Payment Receipt",
+			}
+		).insert()
+
+		self.assertTrue(doc.content_hash)
+		self.assertEqual(doc.status, "Uploaded")
 
 	def test_unsupported_file_type_rejected(self):
 		doc = frappe.get_doc(

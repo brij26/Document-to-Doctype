@@ -13,7 +13,7 @@ Only set a phase to `Approved` after **explicit user sign-off** (see `CLAUDE.md`
 | 0 | Scaffold | Approved |
 | 1 | Capture doctype + upload + status | Approved |
 | 2 | OCR layer (`ocr/*`) | Approved |
-| 3 | Mapper / LLM layer (`mappers/*`) | Not Started |
+| 3 | Mapper / LLM layer (`mappers/*`) | Awaiting Review |
 | 4 | Review queue + draft creation | Not Started |
 | 5+ | Future (Should / Nice-to-Have) | Not Started |
 
@@ -21,10 +21,12 @@ Only set a phase to `Approved` after **explicit user sign-off** (see `CLAUDE.md`
 
 ## Current focus
 
-**Phase 2 — Approved.** OCR layer (`ocr/*`) built: `OCREngine` protocol,
-`pymupdf_extractor`, `preprocess`, `paddle_engine`, `tesseract_engine`, and the
-`frappe.enqueue` job writing `raw_ocr_json`. Phase 3 not started — awaiting
-explicit go-ahead.
+**Phase 3 — Awaiting Review.** Mapper / LLM layer (`mappers/*`) complete —
+`schema.py`, `layout.py`, `llm_client.py`/`claude_client.py`,
+`classifier.py`, both mappers' `FIELDS` + `build_dto`, `alias_resolver.py`,
+`pipeline.py`. All 4 `source_type` fixtures acquired and classifier
+calibrated against them. See `docs/PHASE_3_MAPPER_PLAN.md` for the full
+design rationale. Awaiting user sign-off before Phase 4.
 
 ## Log
 
@@ -210,3 +212,423 @@ explicit go-ahead.
   `docs/manual_test/phase-2-ocr-layer.md` if adding a case there).
 - 2026-07-16: user signed off. Phase 2 → Approved. Phase 3 not started —
   will not begin until the user explicitly says go.
+- 2026-07-16: user said go. Phase 3 started. Planning discussion pinned down
+  4 design gaps before code: (a) `FIELDS` is a hand-curated superset per
+  mapper, not derived from ERPNext doctype `reqd` meta — audited Payment
+  Entry/Journal Entry `validate()` and confirmed most conditional-mandatory
+  fields (`party_type`, `exchange_rate`, `reference_no`) aren't visible in
+  the JSON schema at all; (b) added `layout.py::reconstruct` as an explicit
+  named step — `raw_ocr_json` has no document-level flattened text anywhere,
+  confirmed against the existing multi-column `sales_order_page1` fixture;
+  (c) split `LLMParser.parse(ocr_json, source_type) -> dto`
+  (`DESIGN_PRINCIPLES.md:43`) into `<target>_mapper.build_dto` (owns
+  reconstruction/prompt/DTO assembly) + `LLMParser.extract_fields` (the one
+  vendor-swappable call) to remove a naming collision — `DESIGN_PRINCIPLES.md`
+  updated to match; (d) classifier is heuristic-first (keyword scorer over
+  `layout.reconstruct` output), falling back to one LLM call only on
+  low-confidence, to avoid doubling API cost per document; threshold
+  calibrated by tuning against fixtures for zero misclassifications, same
+  approach as Phase 2's DPI work. Full rationale: `docs/PHASE_3_MAPPER_PLAN.md`
+  (cross-referenced from `docs/manual_test/phase-3-mapper-llm-layer.md`,
+  which also gained 2 new checks for reconstruction/heuristic-path
+  coverage). Fixture status: `sales_order_page1` (existing, multi-column,
+  used for the reconstruction test) and a newly-acquired Bank Statement
+  sample (stock/generic, verified fixture-safe) are in place; Payment
+  Receipt, Supplier Bill, and Expense Voucher fixtures are still needed
+  before classifier calibration can run — `classifier.py` and
+  `pipeline.py` are blocked on those and deferred. Building the
+  non-blocked pieces first: `schema.py`, `layout.py`,
+  `llm_client.py`/`claude_client.py`, `payment_entry_mapper.py` +
+  `journal_entry_mapper.py` (`FIELDS` + `build_dto`), `alias_resolver.py`.
+- 2026-07-16 (follow-up): built the non-blocked Phase 3 pieces. New files:
+  `docapture/mappers/schema.py` (`FieldValue`, `PaymentEntryDTO`,
+  `JournalEntryDTO`, `overall_confidence`, `to_json`), `layout.py`
+  (`reconstruct()` — bands lines by y-overlap via union-find, then sorts
+  bands top-to-bottom and lines within a band left-to-right), `llm_client.py`
+  (`LLMParser` protocol, `extract_fields(prompt_text, field_specs)`),
+  `claude_client.py` (`ClaudeParser`, `claude-opus-4-8`, structured-output
+  JSON schema built per field, `additionalProperties: false`),
+  `payment_entry_mapper.py` and `journal_entry_mapper.py` (`FIELDS` +
+  `build_dto`; Journal Entry rows are flattened as `row1_*`/`row2_*`
+  dto_fields since `extract_fields` returns a flat dict, then split back into
+  `JournalEntryDTO.rows` — fixed at 2 rows, documented as a `ponytail:`
+  simplification), `alias_resolver.py` (`normalize`, `resolve`,
+  `resolve_extracted`). `anthropic` added to `pyproject.toml` and installed
+  via `bench pip install`.
+  Two bugs caught by tests during this pass, both fixed: `normalize()`
+  only stripped `"pvt ltd"` as a suffix, so `"ABC pvt limited"` (no periods,
+  no comma) left a dangling `"pvt"` — added `"pvt limited"` to the suffix
+  list. `alias_resolver.resolve()` was designed to scope lookups to "no
+  company" (matching Capture Alias rows with an empty `company`), but Frappe
+  auto-fills any Link field whose `options` is `"Company"` from the site's
+  default Company on insert — so in a single-company deployment nearly every
+  Capture Alias row ends up with `company` set, and the "unscoped" filter
+  matched nothing. Fixed by dropping the `company` filter entirely for
+  Phase 3 (documented as a `ponytail:` — thread real company-scoping through
+  once Phase 4 resolves a document's company before extraction).
+  Checks: `bench --site erpnext.yoursite.in run-tests --app docapture` —
+  48/48 pass (30 unit + 18 integration, all pre-existing OCR-layer tests
+  still green); `ruff check .` clean; `bench --site erpnext.yoursite.in
+  migrate` clean (no schema changes this pass).
+  Still blocked, unchanged from the prior entry: `classifier.py` (heuristic
+  keyword scorer + threshold calibration) and `pipeline.py` (orchestration)
+  need the 3 missing fixtures (Payment Receipt, Supplier Bill, Expense
+  Voucher) before they can be built and tested — calibration specifically
+  needs all 4 `source_type` fixtures to tune against. `docs/PHASE_STATUS.md`
+  stays `In Progress`, not `Awaiting Review`, until those land.
+- 2026-07-16 (follow-up 2): user supplied the 3 remaining `source_type`
+  fixtures (`sample_Expense_Voucher.png`, `sample_supplier_bill.png`,
+  `sample_payment_reciept.webp` — the last a new format, first `.webp` in
+  the app) plus corrected real-vocabulary findings from reading the images
+  directly: two of the plan's assumed keywords ("received with
+  thanks"/"receipt no." for Payment Receipt, "expense head" for Expense
+  Voucher) don't actually appear in the documents. Before building, OCR'd
+  all 5 calibration documents (4 real fixtures + Sales Order as the
+  negative case) for real via `paddle_engine` + `layout.reconstruct` to get
+  ground-truth text rather than guessing the Expense Voucher's true second
+  signal — found `"expense voucher"` (the title itself) + `"payment
+  method"`.
+  **WEBP:** investigated the full ingestion path before assuming it needed
+  a new decode branch. `cv2.imdecode` (this bench's
+  `opencv-contrib-python==4.10.0.84`, bundled libwebp) and Pillow 12.2.0
+  both decode WEBP correctly, confirmed empirically; `docapture/ocr/
+  pipeline.py`'s raster branch and every downstream OCR module are already
+  format-agnostic. The only two real gates were `Captured Document`'s
+  `ALLOWED_EXTENSIONS` (`captured_document.py`) and its client-side mirror
+  (`captured_document.js`) — both updated to include `.webp`. Also checked
+  Frappe core's `File` doctype end-to-end (validate, thumbnailing, mimetype
+  detection) for a third gate: none found, except `frappe/handler.py`'s
+  `ALLOWED_MIMETYPES` on the Guest/portal `upload_file` endpoint, which
+  omits `image/webp` but doesn't apply to `docapture`'s Desk-only upload
+  path — flagged in `docs/ARCHITECTURE.md`'s "Known ceiling" section so
+  it isn't silently rediscovered if a portal upload path is ever added.
+  **New files:** `docapture/mappers/classifier.py` (`classify(ocr_json,
+  llm) -> {source_type, confidence, method}` — heuristic keyword scorer
+  first, one LLM classification call only on low signal) and
+  `docapture/mappers/pipeline.py` (`run_mapper` — classifies, routes to the
+  matching mapper's `build_dto`, writes `extracted_json`/`confidence`,
+  walks `OCR Done → Parsed → In Review`, same staleness-guard and
+  `Failed`+`error_log` pattern as `ocr/pipeline.py::run_ocr`).
+  **Chaining:** `ocr/pipeline.py::run_ocr()` now enqueues
+  `docapture.mappers.pipeline.run_mapper` (by dotted string, not import, to
+  keep `ocr/` and `mappers/` decoupled per `DESIGN_PRINCIPLES.md`) right
+  after writing `status = "OCR Done"`, `enqueue_after_commit=True` — `db_set`
+  doesn't fire hooks, so nothing chained the mapper job before this.
+  **Calibration result:** `CLASSIFICATION_THRESHOLD = 0.6`; all 4 real
+  fixtures score 1.0 on their own type (both keywords present) and 0 on
+  every other type except Expense Voucher, which scores 0.5 against
+  Supplier Bill's list (shares "bill to") — still correctly resolved via
+  argmax since Expense Voucher's own score is 1.0. Sales Order (negative)
+  scores 0 against every type, correctly triggering the LLM fallback
+  instead of a confident misclassification. Documented in
+  `docs/PHASE_3_MAPPER_PLAN.md` as a known v1 limit: calibrated against
+  exactly 5 documents, not a general robustness claim.
+  Also fixed 2 documentation bugs found during this pass, both in
+  `docs/PHASE_3_MAPPER_PLAN.md`: the "Call sequence" section said
+  `confidence = dto.overall_confidence`, but the actual implemented API
+  exposes it as the `confidence` property (`overall_confidence()` is the
+  module-level helper the property calls, not a DTO attribute) — fixed;
+  added a "File layout" section documenting that confidence scoring lives
+  in `schema.py`, not a separate `confidence.py` as an earlier draft named
+  (promoted from a planning-session-only note into the actual design doc).
+  **New tests:** `test_classifier.py` (6 — one heuristic-path test per real
+  fixture including the `.webp` decode, one synthetic near-blank case
+  forcing the LLM fallback since none of the 4 real fixtures exercise that
+  path by construction, one confirming Sales Order falls back rather than
+  being misclassified), `test_pipeline.py` under `mappers/` (3 — happy path
+  with a mocked `ClaudeParser`, stale-status no-op, exception → `Failed`),
+  plus a `.webp` happy-path test in both `captured_document`'s own
+  `test_pipeline.py` (full OCR decode) and `test_captured_document.py`
+  (attach-time acceptance).
+  Checks: `bench --site erpnext.yoursite.in run-tests --app docapture` —
+  59/59 pass (36 unit + 23 integration); `ruff check .` clean; `bench
+  --site erpnext.yoursite.in migrate` clean.
+  **Not done:** the manual UI walkthrough in
+  `docs/manual_test/phase-3-mapper-llm-layer.md` — every item on that
+  checklist has an equivalent automated-test assertion (listed above), but
+  no one has driven the actual Desk UI end-to-end (upload → OCR → mapper →
+  `In Review`) yet. Flagging this explicitly rather than marking the
+  checklist done on the strength of automated coverage alone.
+  Phase 3 → Awaiting Review. Exit criteria met per
+  `docs/PHASED_DEVELOPMENT.md`: OCR JSON produces a structured DTO with
+  confidence; the classifier routes each source type correctly; a value
+  already in `Capture Alias` auto-maps with no prompt; fixture-document
+  tests pass. Stopping here for explicit user review before any Phase 4
+  work, per the phase-gate.
+
+- **2026-07-17, follow-up 3 (LLM backend swap — Claude → OpenAI):** no
+  Anthropic API key available in this environment; an OpenAI key was, so
+  the wired `LLMParser` implementation changed from `ClaudeParser` to a new
+  `OpenAIParser` (`docapture/mappers/openai_client.py`, `gpt-4.1`, OpenAI
+  Responses API structured output). `claude_client.py` is kept, not
+  deleted, as a second `LLMParser` implementation — this is exactly the
+  vendor-swap seam `docs/PHASE_3_MAPPER_PLAN.md`'s "Naming" section
+  designed `extract_fields` for. Only `pipeline.py`'s one import changed;
+  `classifier.py`, both mappers, `alias_resolver.py` are untouched (they
+  depend on the `LLMParser` protocol, never a concrete client). Factored
+  the JSON-schema/prompt-building logic (previously private to
+  `claude_client.py`) out into `llm_client.py` as `build_schema`/
+  `build_prompt`, since a second concrete client made the duplication real
+  rather than hypothetical. `pyproject.toml` gained `openai`; `anthropic`
+  kept. New test: `test_openai_client.py` (mirrors `test_claude_client.py`).
+  Updated `test_pipeline.py`'s two `patch.object(pipeline, "ClaudeParser",
+  ...)` calls to `"OpenAIParser"`. `docs/PHASE_3_MAPPER_PLAN.md`'s "File
+  layout" section updated in place.
+  Checks: `bench run-tests --app docapture` — 60/60 pass (37 unit + 23
+  integration); `ruff check .` clean.
+  **Still open, not part of this fix:** `OPENAI_API_KEY` isn't set in this
+  bench yet — `OpenAIParser()`'s default `openai.OpenAI()` reads it from
+  the environment. Needs either an exported env var ahead of `bench start`/
+  `bench worker`, or `bench --site erpnext.yoursite.in set-config
+  openai_api_key <key>` plumbed into `OpenAIParser.__init__` explicitly
+  (not done here — no key was supplied to test against, so wiring it
+  untested would just move the failure, not fix it). Phase 3 stays
+  `Awaiting Review`; this is a same-phase fix, not new scope.
+
+- **2026-07-17, follow-up 4 (config-driven parser selection):** user
+  feedback on follow-up 3 — `pipeline.py` importing `OpenAIParser` by name
+  meant every vendor swap touched production code (`pipeline.py`) plus a
+  test patch target, when the whole point of the `LLMParser` protocol
+  (`docs/DESIGN_PRINCIPLES.md`'s L section) is that callers shouldn't care
+  which concrete implementation they hold. Added `llm_client.get_parser()`
+  — reads `site_config.json`'s `llm_backend` (`"openai"` default,
+  `"claude"` alternative), returns the matching concrete `LLMParser`.
+  `pipeline.py` now calls `llm_client.get_parser()` instead of importing
+  `OpenAIParser` directly; swapping vendor (or trying a different model
+  tier) is a `bench set-config llm_backend claude` away, zero code edits.
+  Considered and rejected the "make `LLMParser` an ABC, have both clients
+  inherit it" framing of the same feedback — Python's `Protocol` already
+  gives structural interchangeability without inheritance; forcing a base
+  class would add boilerplate with no substitutability gain the `Protocol`
+  doesn't already provide. New test: `test_llm_client.py` (2 — default
+  branch, `"claude"` branch; both stub `OPENAI_API_KEY`/`ANTHROPIC_API_KEY`
+  via `patch.dict` so branch selection doesn't need real credentials to
+  test). Updated `test_pipeline.py`'s two patch targets from
+  `pipeline.OpenAIParser` to `llm_client.get_parser`.
+  Checks: `bench run-tests --app docapture` — 62/62 pass (39 unit + 23
+  integration); `ruff check .` clean.
+  `docs/PHASE_3_MAPPER_PLAN.md`'s "File layout" and "LLM backend" sections
+  updated in place. Phase 3 stays `Awaiting Review` — same-phase fix.
+
+- **2026-07-17, follow-up 5 (LangSmith tracing):** user request — observe
+  `LLMParser` calls (prompt, response, latency, cost) via LangSmith.
+  `ClaudeParser`/`OpenAIParser` now wrap only their *default*-constructed
+  client (`wrap_anthropic`/`wrap_openai` from `langsmith.wrappers`); a
+  caller-supplied client (every test) is left unwrapped, so no test needed
+  changing and no test run produces a trace. Purely env-var controlled
+  (`LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`) — off by
+  default, no code branch to toggle. Added `.env.example` at the bench
+  root (`/home/brij/frappe/frappe-bench/.env.example`, outside
+  `apps/docapture/` — it documents bench-wide process env, same as
+  `Procfile`) listing `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` alongside the
+  three `LANGSMITH_*` vars, since `bench start` (honcho) auto-loads
+  `.env` from the bench root for every Procfile process including the
+  worker. `pyproject.toml` gained `langsmith`.
+  Checks: `bench run-tests --app docapture` — 62/62 pass; `ruff check .`
+  clean. `docs/PHASE_3_MAPPER_PLAN.md`'s "LLM backend" section updated in
+  place. Phase 3 stays `Awaiting Review` — same-phase fix, no scope
+  change to Phase 3's exit criteria.
+
+- **2026-07-17, follow-up 6 (Print Format for extracted_json):** user
+  request — see `extracted_json`'s structured content readably, via a real
+  Frappe Print Format (not just the raw JSON textbox on the form). Added
+  `docapture/docapture/print_format/extracted_fields_view/` ("Docapture
+  Extracted Fields", Jinja, `doc_type: Captured Document`) — same pattern
+  as Phase 2's existing `ocr_text_view` ("Docapture OCR Text") print
+  format. Parses `doc.extracted_json`, renders source_type/status/overall
+  confidence, a field/value/confidence table for `fields`, and one more
+  such table per `rows` entry (Journal Entry's 2-row shape) when present;
+  falls back to "No extracted fields yet." when `extracted_json` is empty
+  (mirrors `ocr_text_view`'s empty-state handling). Verified via
+  `frappe.get_print("Captured Document", "CAP-00028", print_format=...)`
+  against a real `In Review` doc from a prior test run — renders the full
+  Supplier Bill → Journal Entry field/row breakdown correctly, no
+  exceptions.
+  Checks: `bench run-tests --app docapture` — 62/62 pass; `ruff check .`
+  clean; `bench migrate` clean (new Print Format synced). Phase 3 stays
+  `Awaiting Review` — same-phase fix.
+
+- **2026-07-17, follow-up 7 (LangSmith traces stuck "pending"):** root
+  cause — `frappe.enqueue` jobs run under RQ, which forks a child process
+  per job and calls `os._exit(0)` on it when the job returns
+  (`rq/worker.py`). `os._exit` skips `atexit` entirely, so LangSmith
+  `Client`'s normal atexit-registered flush of its background send queue
+  never runs; every trace from a background job (the only place
+  `OpenAIParser`/`ClaudeParser` ever actually run) recorded a start but
+  never got its end/output event out before the process was killed —
+  hence "pending" forever. Fix: `llm_client.new_tracer()` — each parser
+  now creates its own `langsmith.Client`, passes it into
+  `wrap_anthropic`/`wrap_openai` via `tracing_extra={"client": ...}`, and
+  calls `tracer.flush()` synchronously inside `extract_fields()` right
+  after building the result, before returning control to the job. Safe
+  unconditionally (no-op when tracing is off). No test changes needed —
+  test doubles are still injected via the `client=` param and skip the
+  tracer path entirely (`self._tracer` stays `None`).
+  Checks: `bench run-tests --app docapture` — 62/62 pass; `ruff check .`
+  clean. `docs/PHASE_3_MAPPER_PLAN.md`'s "LangSmith tracing" section
+  updated in place. Phase 3 stays `Awaiting Review` — same-phase fix.
+
+- **2026-07-17, follow-up 8 (UML_DIAGRAM.md sync):** `docs/UML_DIAGRAM.md`
+  still showed the whole `Phase3_MapperLLM` namespace as "Not Started" /
+  grey-dashed "(planned)" boxes, stale since follow-ups 1-7 actually built
+  it. Replaced with the real modules/classes (`llm_client.py`'s `get_parser`
+  and `new_tracer`, `ClaudeParser`/`OpenAIParser` realizing `LLMParser`,
+  `layout.py`, `schema.py`'s DTOs, `classifier.py`, both mappers,
+  `alias_resolver.py`, `mappers/pipeline.py`) and real relationship edges,
+  including the `ocr/pipeline.py` → `mappers/pipeline.py` chaining
+  (`enqueue_after_commit`) that connects Phase 2 to Phase 3. Phase 4's
+  namespace is untouched — still genuinely not started, stays
+  planned/dashed. No code changed; doc-only sync.
+
+- **2026-07-17, follow-up 9 (bank-statement table extraction):** user
+  uploaded a real 9-page, ~190-row Union Bank of India bank statement
+  (`CAP-00031`) and asked for it to end up as one Journal Entry per row.
+  Checked its actual `extracted_json` first: `payment_entry_mapper` had
+  captured exactly the statement's first transaction and silently dropped
+  the other ~189 — neither `PaymentEntryDTO` (one flat field set) nor
+  `JournalEntryDTO` (fixed at 2 rows) can represent a variable-length
+  table, and `LLMParser.extract_fields` could only ever return one flat
+  dict per call. `classifier.py` also misrouted this real document as
+  Payment Receipt (0.94 confidence): `KEYWORDS["Bank Statement"] =
+  ["previous balance", "withdrawals"]` scored 0.5 (this statement says
+  "Statement of Account", never "previous balance") and fell through to an
+  LLM fallback that guessed wrong.
+  User raised a real design constraint before any code: different banks
+  use different column names/layouts for the same data, so nothing here
+  may hardcode literal source column strings. Confirmed this doesn't touch
+  the existing `FIELDS` design — those already extract by canonical target
+  field name + semantic hint, not literal column text — the actual gap was
+  variable-row-count extraction, not column-naming.
+  **Built:** `schema.py` gained `BankStatementDTO` (`fields` +
+  `transactions: list[dict[str, FieldValue]]`, variable length,
+  `to_json()` sets `target_doctype: "Journal Entry"`); `llm_client.py`
+  gained `LLMParser.extract_rows` + `build_row_schema`/`build_row_prompt`
+  (array-of-rows, same per-field contract as `extract_fields`), implemented
+  in both `OpenAIParser` and `ClaudeParser`; `layout.py` gained
+  `reconstruct_pages` (per-page text, `reconstruct()` now built on top of
+  it); new `bank_statement_mapper.py` (`FIELDS` for statement-level data +
+  `ROW_FIELDS` for canonical per-row fields, one `extract_rows` call per
+  page rather than one call for the whole document); `Capture Alias`
+  gained a `Customer` `entity_type` option (previously missing entirely);
+  `classifier.py`'s `KEYWORDS["Bank Statement"]` recalibrated to
+  `["withdrawals", "deposits"]` — the transaction table's own column
+  headers, verified present in both the original stock fixture and the
+  real UBI statement; `pipeline.py` now routes `Bank Statement` →
+  `bank_statement_mapper` instead of `payment_entry_mapper` (deliberate
+  divergence from `docs/FEATURE_LIST.md`'s original "bank statement →
+  Payment Entry" plan — many real rows here, self-transfers between the
+  account holder's own sub-accounts, GST/TDS/bank fees, have no
+  Customer/Supplier party at all, which Journal Entry doesn't require and
+  Payment Entry does). Added `sample_bank_statement_ubi.pdf` as a
+  real-world calibration fixture alongside the existing stock PNG.
+  **Explicitly out of scope, deferred:** turning
+  `BankStatementDTO.transactions` into actual per-row Journal Entry drafts
+  — that's Phase 4 (review queue + draft creation), not started, needs its
+  own explicit go-ahead per this file's phase-gate rule.
+  Two Capture Alias-dependent tests
+  (`test_counterparty_name_resolves_against_customer_alias`,
+  `..._falls_back_to_supplier_alias`) initially failed with
+  `LinkValidationError: Could not find Mapped Docname` — `mapped_docname`
+  is a Dynamic Link validated against `mapped_doctype`, so the test fixture
+  needs a real inserted `Customer`/`Supplier` record, not just an arbitrary
+  string. Fixed by inserting one in each test before the `Capture Alias`
+  row.
+  Checks: `bench --site erpnext.yoursite.in run-tests --app docapture` —
+  76/76 pass (46 unit + 30 integration); `ruff check .` clean (3 import-sort
+  autofixes in `claude_client.py`/`openai_client.py`/`pipeline.py`, no
+  logic changes); `bench migrate` clean.
+  `docs/PHASE_3_MAPPER_PLAN.md`'s "File layout", "Classifier", "Fixtures",
+  and "Routing" sections updated in place, plus a new "Bank Statement:
+  variable-length table extraction" section. Phase 3 stays `Awaiting
+  Review` — same-phase addition, not new scope beyond what Phase 3 already
+  covers (structured extraction with confidence, for every source type).
+  **Verified live, not just by tests:** a real re-upload of the UBI
+  statement (`CAP-00032`) went through the actual pipeline (real OpenAI
+  call, not a stub) and correctly classified as Bank Statement, routed to
+  `bank_statement_mapper`, and extracted all 189 transaction rows — matches
+  the PDF's own "Records from 1 to 189" footer exactly, first row is the
+  01-12-2025 ₹50,00,000 TRF GAYATRI PRIVATE LIMITED entry, confidence 0.97.
+
+- **2026-07-17, follow-up 10 (print format missing Bank Statement
+  transactions):** user viewed `CAP-00032`'s "Docapture Extracted Fields"
+  print format and saw only the 4 statement-level fields — none of the 189
+  transaction rows confirmed present in follow-up 9. Root cause: the print
+  format (`extracted_fields_view.json`, added before `BankStatementDTO`
+  existed) only has template branches for `extracted.fields` and
+  `extracted.rows` (`JournalEntryDTO`'s fixed 2-row shape) — no branch for
+  `extracted.transactions` at all, so it silently stopped after the parent
+  fields table. Fixed: added an `{%- elif extracted.transactions %}`
+  branch rendering one single table (Date/Narration/Reference No/
+  Withdrawal/Deposit/Balance/Counterparty/Party columns, one row per
+  transaction) instead of the existing per-row field/value/confidence
+  sub-table pattern, which only makes sense at 2 rows, not 189. Also added
+  `word-wrap`/`overflow-wrap`/`word-break` CSS on every table cell in this
+  print format, in case a long value (e.g. a long narration string) was
+  separately getting visually clipped.
+  ponytail: the new transactions table skips the per-field confidence
+  column the other two tables show — unreadable at 8 fields × 189 rows,
+  and confidence is ~1.0 across the board on the real document; add a
+  low-confidence flag back if that turns out to matter during review.
+  **Real gotcha hit during verification:** editing the `.json` fixture file
+  directly and running `bench migrate` did NOT update the live `Print
+  Format` DB record — `frappe.db.get_value("Print Format", ..., "html")`
+  still showed the old template after migrate. Standard-doctype fixture
+  sync appears to skip re-importing when it judges the DB copy no older
+  than the file (this file's `modified` timestamp was left unchanged by
+  the edit). Fixed by explicitly calling
+  `frappe.reload_doc("docapture", "print_format", "extracted_fields_view", force=True)`
+  once, which force-syncs from the file regardless of timestamps — worth
+  remembering for any future direct edit to a standard fixture `.json`.
+  Verified via `frappe.get_print("Captured Document", "CAP-00032", ...)`:
+  196 `<tr>` total (1 info + 5 fields-table + 1 transactions-header + 189
+  transaction rows — exact expected count), first/last transaction values
+  present and correct. Pure print-format content change — no doctype/
+  schema/Python changes, so no test suite impact; not itself Phase 4 scope
+  (no draft/document creation), just fixing visibility into data Phase 3
+  already extracts.
+
+- **2026-07-17, follow-up 11 (withdrawal/deposit misclassification):** user
+  reported many rows on the real UBI statement have the amount under the
+  wrong one of `withdrawal`/`deposit` (example given: the "TRF 201-54921"
+  row is a deposit but was extracted as a withdrawal). Root cause:
+  `layout._reconstruct_page()` reconstructs OCR bands into plain
+  reading-order text, which discards column position — a table row like
+  `date | narration | ref | withdrawal | deposit | balance` becomes a flat
+  string with just one bare amount (since the two fields are mutually
+  exclusive per row), leaving `extract_rows` nothing but context/wording to
+  guess which named column it came from. Not a prompt-wording problem: the
+  column identity is already gone by the time the LLM sees the text.
+  Researched the reference product the user pointed at (aiaccountant.com,
+  a Tally-focused AI-accountant tool) for how it handles this class of
+  document — its own published description: "For each row, previous
+  balance plus credits minus debits must equal next balance... amount
+  sanity checks catch sign flips." Same technique applied here: added
+  `bank_statement_mapper._correct_withdrawal_deposit()`, a deterministic
+  post-process (no LLM/OCR change) that walks the fully concatenated
+  `transactions` list once, carrying forward the last parseable `balance`,
+  and for each row where the balance delta's sign disagrees with which
+  field (`withdrawal` vs `deposit`) the LLM populated, swaps the amount
+  into the correct field (keeping the same OCR digit value — only "which
+  field it belongs to" was wrong). Rows with no previous parseable balance
+  to diff against (the first row; any row following one with an
+  unparseable balance) are left as extracted, not guessed at.
+  ponytail: only the debit/credit sign-flip is fixed — aiaccountant.com's
+  write-up mentions adjacent checks (opening/closing balance
+  reconciliation, UTR-based duplicate detection, date monotonicity,
+  IFSC/UTR format validation) that are the same family of idea but have no
+  evidence of being a problem here yet; not built speculatively.
+  New tests in `test_bank_statement_mapper.py`: wrong-side amount corrected
+  in both directions, already-correct amount left untouched (value/
+  confidence unchanged), row with unparseable balance left uncorrected
+  while the chain still continues past it using the last known balance,
+  and correction chains across a page boundary. **Checks:** `bench
+  --site erpnext.yoursite.in run-tests --app docapture` — 81/81 pass (46
+  unit + 35 integration); `ruff check .` — clean. **Verified against real
+  data:** ran the new correction function over `CAP-00032`'s already-
+  stored 189-row `extracted_json` (no new LLM call) — 82 of 189 rows
+  (~43%) had a wrong debit/credit side, all corrected, including the
+  exact "TRF 201-54921" row the user reported (was `withdrawal: 20000.00`,
+  now `deposit: 20000.00`, matching its balance delta). Pure Python change
+  in `bank_statement_mapper.py`, no schema/doctype changes; latency on
+  9-page documents was also raised by the user but explicitly marked "not
+  a concern now," so left untouched.

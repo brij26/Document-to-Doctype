@@ -3,6 +3,9 @@
 **Status:** Not Started — this is a forward-looking checklist, to be executed
 once the phase is built and moved to `Awaiting Review`.
 
+See also: `docs/PHASE_3_MAPPER_PLAN.md` for why these fields/this
+classifier design were chosen — this checklist only verifies behavior.
+
 **Goal:** turn OCR JSON into a structured DTO with confidence, and resolve
 known entities automatically.
 
@@ -33,6 +36,19 @@ known entities automatically.
 - [ ] Run a document with a value that has **no** matching alias → confirm it
       is left unresolved (flagged for review), not silently guessed or
       dropped.
+
+### Layout reconstruction (added during Phase 3 planning)
+- [ ] Run the `sales_order_page1` fixture (its letterhead is genuinely
+      multi-column: company info left, "Sales Order"/order-number right, same
+      vertical band) through `layout.reconstruct` → confirm the two columns
+      stay grouped as separate blocks rather than interleaving line-by-line.
+
+### Classifier heuristic path (added during Phase 3 planning)
+- [ ] For each of the 4 `source_type` fixtures, confirm the heuristic
+      keyword scorer classifies correctly on its own — no LLM classification
+      call made (check logs/call count).
+- [ ] Force an ambiguous/near-empty fixture → confirm the LLM classification
+      fallback fires only in that case, not on the clear-signal fixtures.
 
 ## Expected result
 Every fixture source type classifies correctly, `extracted_json` +

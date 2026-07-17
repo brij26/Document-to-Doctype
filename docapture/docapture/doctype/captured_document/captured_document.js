@@ -6,7 +6,7 @@ frappe.ui.form.on("Captured Document", {
 		frm.set_df_property("file", "options", {
 			restrictions: {
 				// Keep in sync with ALLOWED_EXTENSIONS in captured_document.py.
-				allowed_file_types: [".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"],
+				allowed_file_types: [".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"],
 			},
 		});
 	},

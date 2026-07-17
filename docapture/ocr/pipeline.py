@@ -30,6 +30,16 @@ def run_ocr(captured_document: str):
 	try:
 		raw_ocr_json = extract_captured_document(doc)
 		doc.db_set({"raw_ocr_json": frappe.as_json(raw_ocr_json), "status": "OCR Done"}, notify=True)
+		# Chain to the mapper layer (docs/ARCHITECTURE.md: enqueue the next
+		# stage on completion, don't call its code directly). Referenced by
+		# dotted string, not imported, so docapture/ocr/* stays independent of
+		# docapture/mappers/* (docs/DESIGN_PRINCIPLES.md).
+		frappe.enqueue(
+			"docapture.mappers.pipeline.run_mapper",
+			queue="long",
+			enqueue_after_commit=True,
+			captured_document=doc.name,
+		)
 	except Exception:
 		doc.db_set({"error_log": traceback.format_exc(), "status": "Failed"}, notify=True)
 

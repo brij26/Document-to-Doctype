@@ -11,7 +11,7 @@ from frappe.utils.file_manager import get_file
 
 # Matches what docapture/ocr/pipeline.py handles: .pdf via the native pymupdf path,
 # the rest via cv2.imdecode.
-ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
+ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
 
 
 class CapturedDocument(Document):
@@ -26,7 +26,7 @@ class CapturedDocument(Document):
 		extension = Path(self.file).suffix.lower()
 		if extension not in ALLOWED_EXTENSIONS:
 			frappe.throw(
-				_("Unsupported file type {0}. Supported: PDF, JPG, PNG, TIFF, BMP.").format(extension),
+				_("Unsupported file type {0}. Supported: PDF, JPG, PNG, TIFF, BMP, WEBP.").format(extension),
 				frappe.ValidationError,
 			)
 

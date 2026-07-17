@@ -40,7 +40,7 @@ router must not care which concrete engine, parser, or creator it holds.
 
 Keep the protocols thin and honest:
 - `OCREngine.extract(bytes) -> ocr_json`
-- `LLMParser.parse(ocr_json, source_type) -> dto`
+- `LLMParser.extract_fields(prompt_text, field_specs) -> dict`
 - `Creator.create(dto) -> doc`
 
 No fat "do everything" base class. A consumer should depend only on the method it

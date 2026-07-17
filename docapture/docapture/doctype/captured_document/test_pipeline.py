@@ -15,6 +15,7 @@ EXTRA_TEST_RECORD_DEPENDENCIES = []
 IGNORE_TEST_RECORD_DEPENDENCIES = ["Company"]
 
 FIXTURE_DIR = Path(frappe.get_app_path("docapture")).parent / "tests/fixtures/ocr/sales_order_page1"
+MAPPER_FIXTURE_DIR = Path(frappe.get_app_path("docapture")).parent / "tests/fixtures/mappers"
 
 
 def _captured_document(dn, filename, content, source_type="Payment Receipt"):
@@ -63,6 +64,25 @@ class IntegrationTestPipeline(IntegrationTestCase):
 		self.assertGreater(len(page["lines"]), 0)
 		all_text = " ".join(line["text"] for line in page["lines"])
 		self.assertIn("Sigzen", all_text)
+
+	def test_webp_image_produces_ocr_engine_page(self):
+		# First .webp fixture in the app (docs/PHASE_3_MAPPER_PLAN.md) —
+		# confirms cv2.imdecode handles it end-to-end through the same
+		# raster branch as jpg/png, not just that the extension is allowed.
+		doc = _captured_document(
+			"test-ocr-webp", "receipt.webp", (MAPPER_FIXTURE_DIR / "sample_payment_reciept.webp").read_bytes()
+		)
+
+		pipeline.run_ocr(doc.name)
+		doc.reload()
+
+		self.assertEqual(doc.status, "OCR Done")
+		raw = json.loads(doc.raw_ocr_json)
+		page = raw["pages"][0]
+		self.assertEqual(page["engine"], "paddleocr")
+		self.assertGreater(len(page["lines"]), 0)
+		all_text = " ".join(line["text"] for line in page["lines"]).lower()
+		self.assertIn("receipt", all_text)
 
 	def test_run_ocr_is_a_noop_when_status_is_no_longer_uploaded(self):
 		doc = _captured_document("test-ocr-stale", "input.jpg", (FIXTURE_DIR / "input.jpg").read_bytes())

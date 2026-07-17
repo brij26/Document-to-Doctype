@@ -158,3 +158,10 @@ Payment Entry references a JE rather than an invoice, so reconciliation is clunk
 than the Purchase Invoice path. This is an accepted MVP tradeoff (the user chose
 PE/JE-first over Purchase Invoice) and is resolved when supplier bills graduate to
 Purchase Invoice in a Future phase.
+
+Frappe core's `frappe/handler.py` `ALLOWED_MIMETYPES` (used by the whitelisted
+`upload_file` REST endpoint) omits `image/webp`, and rejects Guest/no-desk-access
+uploads outright regardless of `Captured Document`'s own `ALLOWED_EXTENSIONS`.
+Inapplicable today — `docapture` uploads only go through the Desk `Attach`
+control (System Users, not portal/Guest) — but worth a written flag so it isn't
+silently rediscovered if a portal-facing upload path is ever added.

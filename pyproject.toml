@@ -16,6 +16,9 @@ dependencies = [
     "opencv-contrib-python==4.10.0.84",
     "pillow",
     "rapidfuzz",
+    "anthropic",
+    "openai",
+    "langsmith",
 ]
 
 [build-system]
