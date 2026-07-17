@@ -101,15 +101,54 @@ classDiagram
         }
     }
 
-    %% Phase 3 -- Mapper / LLM layer, mappers/* (Not Started)
+    %% Phase 3 -- Mapper / LLM layer, mappers/* (Awaiting Review)
     namespace Phase3_MapperLLM {
         class LLMParser {
-            <<Protocol, planned>>
+            <<Protocol>>
+            +extract_fields(prompt_text, field_specs) dict
         }
-        class classifier["classifier (planned)"]
-        class payment_entry_mapper["payment_entry_mapper (planned)"]
-        class journal_entry_mapper["journal_entry_mapper (planned)"]
-        class alias_resolver["alias resolver (planned)"]
+        class llm_client_module["llm_client.py"] {
+            +get_parser() LLMParser
+            +new_tracer() Client
+            +build_schema(field_specs) dict
+            +build_prompt(prompt_text, field_specs) str
+        }
+        class ClaudeParser {
+            +extract_fields(prompt_text, field_specs) dict
+        }
+        class OpenAIParser {
+            +extract_fields(prompt_text, field_specs) dict
+        }
+        class layout_module3["layout.py"] {
+            +reconstruct(ocr_json) str
+        }
+        class schema_module3["schema.py"] {
+            +FieldValue
+            +PaymentEntryDTO
+            +JournalEntryDTO
+            +overall_confidence(fields) float
+        }
+        class classifier_module["classifier.py"] {
+            +classify(ocr_json, llm) dict
+            +KEYWORDS
+            +CLASSIFICATION_THRESHOLD
+        }
+        class payment_entry_mapper_module["payment_entry_mapper.py"] {
+            +FIELDS
+            +build_dto(ocr_json, llm) PaymentEntryDTO
+        }
+        class journal_entry_mapper_module["journal_entry_mapper.py"] {
+            +FIELDS
+            +build_dto(ocr_json, llm) JournalEntryDTO
+        }
+        class alias_resolver_module["alias_resolver.py"] {
+            +normalize(raw_value) str
+            +resolve(entity_type, raw_value)
+            +resolve_extracted(raw_fields, entity_type_by_field) dict
+        }
+        class mapper_pipeline_module["mappers/pipeline.py"] {
+            +run_mapper(captured_document)
+        }
     }
 
     %% Phase 4 -- Review queue + draft creation (Not Started)
@@ -131,11 +170,27 @@ classDiagram
 
     pipeline_module ..> CapturedDocument : reads/writes\nraw_ocr_json, status
     hooks_py ..> pipeline_module : after_insert enqueue_ocr
+    pipeline_module ..> mapper_pipeline_module : enqueue_after_commit\nrun_mapper (chaining)
 
-    alias_resolver ..> CaptureAlias : lookup/auto-map
-    classifier ..> CapturedDocument : source_type
-    payment_entry_mapper ..> CapturedDocument : raw_ocr_json to extracted_json
-    journal_entry_mapper ..> CapturedDocument : raw_ocr_json to extracted_json
+    ClaudeParser ..|> LLMParser : realizes
+    OpenAIParser ..|> LLMParser : realizes
+    llm_client_module ..> ClaudeParser : constructs\n(llm_backend=claude)
+    llm_client_module ..> OpenAIParser : constructs\n(llm_backend=openai, default)
+
+    classifier_module ..> layout_module3 : reconstruct
+    payment_entry_mapper_module ..> layout_module3 : reconstruct
+    payment_entry_mapper_module ..> schema_module3 : builds
+    payment_entry_mapper_module ..> alias_resolver_module : resolve_extracted
+    journal_entry_mapper_module ..> layout_module3 : reconstruct
+    journal_entry_mapper_module ..> schema_module3 : builds
+    journal_entry_mapper_module ..> alias_resolver_module : resolve_extracted
+    alias_resolver_module ..> CaptureAlias : lookup/auto-map
+
+    mapper_pipeline_module ..> llm_client_module : get_parser
+    mapper_pipeline_module ..> classifier_module : classify
+    mapper_pipeline_module ..> payment_entry_mapper_module : Payment Receipt,\nBank Statement
+    mapper_pipeline_module ..> journal_entry_mapper_module : Supplier Bill,\nExpense Voucher
+    mapper_pipeline_module ..> CapturedDocument : reads raw_ocr_json,\nwrites extracted_json/confidence/status
 
     router ..> payment_entry_creator : dispatch
     router ..> journal_entry_creator : dispatch
@@ -143,11 +198,6 @@ classDiagram
     journal_entry_creator ..> CapturedDocument : docstatus=0 draft
 
     classDef planned fill:#f5f5f5,stroke:#9e9e9e,stroke-dasharray: 5 5
-    class LLMParser planned
-    class classifier planned
-    class payment_entry_mapper planned
-    class journal_entry_mapper planned
-    class alias_resolver planned
     class router planned
     class payment_entry_creator planned
     class journal_entry_creator planned
