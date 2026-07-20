@@ -57,6 +57,24 @@ class IntegrationTestPaymentEntryMapper(IntegrationTestCase):
 		dto = build_dto(_OCR_JSON, llm)
 
 		self.assertEqual(dto.fields["currency"].confidence, 1.0)
+		self.assertEqual(dto.fields["currency"].mapped_doctype, "Currency")
+		self.assertEqual(dto.fields["currency"].mapped_docname, "INR")
+
+	def test_build_dto_marks_alias_eligible_field_as_unresolved_on_miss(self):
+		llm = _StubLLM({"currency": {"value": "Some Unknown Currency", "confidence": 0.5}})
+
+		dto = build_dto(_OCR_JSON, llm)
+
+		self.assertEqual(dto.fields["currency"].mapped_doctype, "Currency")
+		self.assertIsNone(dto.fields["currency"].mapped_docname)
+
+	def test_build_dto_leaves_non_alias_field_unmapped(self):
+		llm = _StubLLM({"posting_date": {"value": "2026-07-16", "confidence": 0.95}})
+
+		dto = build_dto(_OCR_JSON, llm)
+
+		self.assertIsNone(dto.fields["posting_date"].mapped_doctype)
+		self.assertIsNone(dto.fields["posting_date"].mapped_docname)
 
 	def test_build_dto_calls_llm_with_reconstructed_text(self):
 		llm = _StubLLM({})

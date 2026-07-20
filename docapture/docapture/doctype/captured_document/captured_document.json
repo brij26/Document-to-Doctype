@@ -22,6 +22,7 @@
   "section_break_target",
   "target_doctype",
   "target_docname",
+  "postings",
   "error_log"
  ],
  "fields": [
@@ -109,6 +110,13 @@
    "fieldtype": "Dynamic Link",
    "label": "Target Docname",
    "options": "target_doctype",
+   "read_only": 1
+  },
+  {
+   "fieldname": "postings",
+   "fieldtype": "Table",
+   "label": "Postings",
+   "options": "Docapture Posting",
    "read_only": 1
   },
   {

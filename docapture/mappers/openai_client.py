@@ -28,7 +28,8 @@ class OpenAIParser:
 		self._tracer = None
 		if client is None:
 			self._tracer = llm_client.new_tracer()
-			client = wrap_openai(openai.OpenAI(), tracing_extra={"client": self._tracer})
+			api_key = llm_client.resolve_api_key("openai_api_key", "OPENAI_API_KEY")
+			client = wrap_openai(openai.OpenAI(api_key=api_key), tracing_extra={"client": self._tracer})
 		self._client = client
 
 	def extract_fields(self, prompt_text: str, field_specs: list[FieldSpec]) -> dict[str, dict]:

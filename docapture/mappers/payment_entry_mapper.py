@@ -35,12 +35,17 @@ _ENTITY_TYPE_BY_FIELD = {
 }
 
 
-def build_dto(ocr_json: dict, llm: LLMParser) -> PaymentEntryDTO:
+def build_dto(ocr_json: dict, llm: LLMParser, company: str | None = None) -> PaymentEntryDTO:
 	text = layout.reconstruct(ocr_json)
 	raw = llm.extract_fields(text, FIELDS)
-	resolved = alias_resolver.resolve_extracted(raw, _ENTITY_TYPE_BY_FIELD)
+	resolved = alias_resolver.resolve_extracted(raw, _ENTITY_TYPE_BY_FIELD, company)
 	fields = {
-		name: FieldValue(value=result.get("value"), confidence=result.get("confidence", 0.0))
+		name: FieldValue(
+			value=result.get("value"),
+			confidence=result.get("confidence", 0.0),
+			mapped_doctype=_ENTITY_TYPE_BY_FIELD.get(name),
+			mapped_docname=result.get("mapped_docname"),
+		)
 		for name, result in resolved.items()
 	}
 	return PaymentEntryDTO(fields=fields)

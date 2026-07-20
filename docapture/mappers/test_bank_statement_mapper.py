@@ -50,6 +50,33 @@ class IntegrationTestBankStatementMapper(IntegrationTestCase):
 
 		self.assertEqual(dto.fields["account_no"].value, "312805010077512")
 
+	def test_build_dto_resolves_known_bank_account_alias(self):
+		frappe.get_doc(
+			{
+				"doctype": "Capture Alias",
+				"entity_type": "Bank Account",
+				"raw_value": "312805010077512",
+				"normalized_value": alias_resolver.normalize("312805010077512"),
+				"mapped_doctype": "Bank Account",
+				"mapped_docname": "Test Bank Account - UBI",
+				"source": "User Confirmed",
+			}
+		).insert(ignore_links=True)
+		llm = _StubLLM({"account_no": {"value": "312805010077512", "confidence": 0.6}})
+
+		dto = build_dto(_TWO_PAGE_OCR_JSON, llm)
+
+		self.assertEqual(dto.fields["account_no"].mapped_doctype, "Bank Account")
+		self.assertEqual(dto.fields["account_no"].mapped_docname, "Test Bank Account - UBI")
+
+	def test_build_dto_marks_bank_account_field_as_unresolved_on_miss(self):
+		llm = _StubLLM({"account_no": {"value": "999999999", "confidence": 0.6}})
+
+		dto = build_dto(_TWO_PAGE_OCR_JSON, llm)
+
+		self.assertEqual(dto.fields["account_no"].mapped_doctype, "Bank Account")
+		self.assertIsNone(dto.fields["account_no"].mapped_docname)
+
 	def test_build_dto_concatenates_transactions_across_pages(self):
 		llm = _StubLLM(
 			{},
@@ -269,6 +296,61 @@ class IntegrationTestBankStatementMapper(IntegrationTestCase):
 		self.assertEqual(dto.transactions[1]["withdrawal"].value, "500")
 		self.assertEqual(dto.transactions[2]["deposit"].value, "500")
 		self.assertIsNone(dto.transactions[2]["withdrawal"].value)
+
+	def test_row_missing_date_is_forward_filled_from_prior_row(self):
+		llm = _StubLLM(
+			{},
+			rows_by_page={
+				"page one text": [
+					{"date": {"value": "2026-02-18", "confidence": 0.9}},
+					# Same bank statement layout: date printed once per day, this
+					# row's own line has no date at all.
+					{"date": {"value": None, "confidence": 0.0}},
+				]
+			},
+		)
+
+		dto = build_dto({"pages": [_TWO_PAGE_OCR_JSON["pages"][0]]}, llm)
+
+		self.assertEqual(dto.transactions[1]["date"].value, "2026-02-18")
+		self.assertEqual(dto.transactions[1]["date"].confidence, 0.4)
+
+	def test_first_row_missing_date_with_nothing_to_carry_is_left_none(self):
+		llm = _StubLLM({}, rows_by_page={"page one text": [{"date": {"value": None, "confidence": 0.0}}]})
+
+		dto = build_dto({"pages": [_TWO_PAGE_OCR_JSON["pages"][0]]}, llm)
+
+		self.assertIsNone(dto.transactions[0]["date"].value)
+
+	def test_row_with_own_date_is_left_untouched(self):
+		llm = _StubLLM(
+			{},
+			rows_by_page={
+				"page one text": [
+					{"date": {"value": "2026-02-18", "confidence": 0.9}},
+					{"date": {"value": "2026-02-19", "confidence": 0.85}},
+				]
+			},
+		)
+
+		dto = build_dto({"pages": [_TWO_PAGE_OCR_JSON["pages"][0]]}, llm)
+
+		self.assertEqual(dto.transactions[1]["date"].value, "2026-02-19")
+		self.assertEqual(dto.transactions[1]["date"].confidence, 0.85)
+
+	def test_forward_fill_chains_across_a_page_boundary(self):
+		llm = _StubLLM(
+			{},
+			rows_by_page={
+				"page one text": [{"date": {"value": "2026-02-18", "confidence": 0.9}}],
+				"page two text": [{"date": {"value": None, "confidence": 0.0}}],
+			},
+		)
+
+		dto = build_dto(_TWO_PAGE_OCR_JSON, llm)
+
+		self.assertEqual(dto.transactions[1]["date"].value, "2026-02-18")
+		self.assertEqual(dto.transactions[1]["date"].confidence, 0.4)
 
 	def test_correction_chains_across_a_page_boundary(self):
 		llm = _StubLLM(

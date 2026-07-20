@@ -2,11 +2,12 @@
 # For license information, please see license.txt
 
 # Routing (pipeline.py): Bank Statement -> here. Unlike payment_entry_mapper /
-# journal_entry_mapper (one document = one transaction, or a fixed 2-row
-# journal entry), a bank statement is a table of an a-priori-unknown number of
+# journal_entry_mapper (one document = a header + its own variable-length row
+# extraction), a bank statement is a table of an a-priori-unknown number of
 # transaction rows — this mapper extracts that table, one page at a time, into
-# BankStatementDTO.transactions. Phase 4 turns each entry into its own Journal
-# Entry (bank leg + counter-account leg), not one Journal Entry per statement.
+# BankStatementDTO.transactions. Phase 4 groups same-date transactions into
+# one Journal Entry each (bank leg + counter-account leg per transaction),
+# not one Journal Entry per statement or per transaction.
 from docapture.mappers import alias_resolver, layout
 from docapture.mappers.llm_client import LLMParser
 from docapture.mappers.schema import BankStatementDTO, FieldValue
@@ -71,14 +72,19 @@ _ENTITY_TYPE_BY_FIELD = {
 _PARTY_ENTITY_TYPES = ("Customer", "Supplier")
 
 
-def build_dto(ocr_json: dict, llm: LLMParser) -> BankStatementDTO:
+def build_dto(ocr_json: dict, llm: LLMParser, company: str | None = None) -> BankStatementDTO:
 	pages = layout.reconstruct_pages(ocr_json)
 	header_text = pages[0] if pages else ""
 
 	raw_fields = llm.extract_fields(header_text, FIELDS)
-	resolved_fields = alias_resolver.resolve_extracted(raw_fields, _ENTITY_TYPE_BY_FIELD)
+	resolved_fields = alias_resolver.resolve_extracted(raw_fields, _ENTITY_TYPE_BY_FIELD, company)
 	parent_fields = {
-		name: FieldValue(value=result.get("value"), confidence=result.get("confidence", 0.0))
+		name: FieldValue(
+			value=result.get("value"),
+			confidence=result.get("confidence", 0.0),
+			mapped_doctype=_ENTITY_TYPE_BY_FIELD.get(name),
+			mapped_docname=result.get("mapped_docname"),
+		)
 		for name, result in resolved_fields.items()
 	}
 
@@ -87,20 +93,21 @@ def build_dto(ocr_json: dict, llm: LLMParser) -> BankStatementDTO:
 		if not page_text.strip():
 			continue
 		for raw_row in llm.extract_rows(page_text, ROW_FIELDS):
-			transactions.append(_resolve_row(raw_row))
+			transactions.append(_resolve_row(raw_row, company))
 
 	_correct_withdrawal_deposit(transactions)
+	_forward_fill_date(transactions)
 
 	return BankStatementDTO(fields=parent_fields, transactions=transactions)
 
 
-def _resolve_row(raw_row: dict) -> dict[str, FieldValue]:
+def _resolve_row(raw_row: dict, company: str | None) -> dict[str, FieldValue]:
 	row: dict[str, FieldValue] = {}
 	for dto_field, result in raw_row.items():
 		value = result.get("value")
 		confidence = result.get("confidence", 0.0)
 		if dto_field == "counterparty_name" and value:
-			match = _resolve_party(value)
+			match = _resolve_party(value, company)
 			if match:
 				row["counterparty_name"] = FieldValue(value=value, confidence=1.0)
 				row["party_type"] = FieldValue(value=match["entity_type"], confidence=1.0)
@@ -110,9 +117,9 @@ def _resolve_row(raw_row: dict) -> dict[str, FieldValue]:
 	return row
 
 
-def _resolve_party(raw_value: str) -> dict | None:
+def _resolve_party(raw_value: str, company: str | None) -> dict | None:
 	for entity_type in _PARTY_ENTITY_TYPES:
-		match = alias_resolver.resolve(entity_type, raw_value)
+		match = alias_resolver.resolve(entity_type, raw_value, company)
 		if match:
 			return {"entity_type": entity_type, **match}
 	return None
@@ -145,6 +152,23 @@ def _move_if_misplaced(row: dict[str, FieldValue], correct_field: str, wrong_fie
 	if wrong_has_value and not correct_has_value:
 		row[correct_field] = FieldValue(value=wrong_fv.value, confidence=wrong_fv.confidence)
 		row[wrong_field] = FieldValue(value=None, confidence=wrong_fv.confidence)
+
+
+# Some banks print the date once per day and rely on visual grouping for
+# every other same-day transaction — layout.py's flat-text reconstruction
+# loses that grouping, so the LLM has no date token anywhere near those
+# rows to extract. Carries the last-seen parseable date forward onto any
+# row missing one; confidence 0.4 (below the Preview dialog's <0.5
+# low-confidence threshold) since this is an inference, not a real read.
+# Mutates transactions in place.
+def _forward_fill_date(transactions: list[dict[str, FieldValue]]) -> None:
+	last_date = None
+	for row in transactions:
+		date_fv = row.get("date")
+		if date_fv is not None and date_fv.value not in (None, ""):
+			last_date = date_fv.value
+		elif last_date is not None:
+			row["date"] = FieldValue(value=last_date, confidence=0.4)
 
 
 def _parse_amount(field_value: FieldValue | None) -> float | None:

@@ -5,6 +5,7 @@ import traceback
 
 import frappe
 
+from docapture import notify
 from docapture.mappers import (
 	bank_statement_mapper,
 	classifier,
@@ -37,8 +38,10 @@ def run_mapper(captured_document: str):
 		llm = llm_client.get_parser()
 		classification = classifier.classify(ocr_json, llm)
 		build_dto = _BUILD_DTO_BY_SOURCE_TYPE[classification["source_type"]]
-		dto = build_dto(ocr_json, llm)
+		dto = build_dto(ocr_json, llm, doc.company)
 		doc.db_set({"extracted_json": dto.to_json(), "confidence": dto.confidence, "status": "Parsed"}, notify=True)
 		doc.db_set({"status": "In Review"}, notify=True)
 	except Exception:
-		doc.db_set({"error_log": traceback.format_exc(), "status": "Failed"}, notify=True)
+		error = traceback.format_exc()
+		doc.db_set({"error_log": error, "status": "Failed"}, notify=True)
+		notify.notify_failure(doc.name, error)

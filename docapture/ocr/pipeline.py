@@ -9,6 +9,7 @@ import frappe
 import numpy as np
 from frappe.utils.file_manager import get_file
 
+from docapture import notify
 from docapture.ocr import paddle_engine, preprocess, pymupdf_extractor, tesseract_engine
 from docapture.ocr.schema import TARGET_DPI, make_document, make_page
 
@@ -41,7 +42,9 @@ def run_ocr(captured_document: str):
 			captured_document=doc.name,
 		)
 	except Exception:
-		doc.db_set({"error_log": traceback.format_exc(), "status": "Failed"}, notify=True)
+		error = traceback.format_exc()
+		doc.db_set({"error_log": error, "status": "Failed"}, notify=True)
+		notify.notify_failure(doc.name, error)
 
 
 def extract_captured_document(doc) -> dict:

@@ -11,16 +11,22 @@ import frappe
 
 _LEGAL_SUFFIXES = ("pvt ltd", "pvt limited", "private limited", "llp", "inc", "ltd", "limited")
 
-# ponytail: lookups ignore `company` entirely (match on entity_type +
-# normalized_value only) — Phase 3 has no resolved `company` context yet at
-# extraction time (that's itself sometimes an aliased field), and Frappe
-# auto-fills a Link field's `company` from the site's default Company on
-# insert whenever one exists, so filtering for "company not set" would miss
-# most real rows in a single-company deployment. Thread a real `company`
-# through and scope this properly once Phase 4 wires up per-document company
-# resolution; see Capture Alias's own `company` field for the intended
-# scoping — until then, a normalized_value that's ambiguous across companies
-# just resolves to one of them.
+# company (optional) scopes the lookup: tried first as an exact
+# (entity_type, normalized_value, company) match, then falls back to
+# whatever matches on (entity_type, normalized_value) alone — the same
+# unscoped lookup this always did (docs/COMPETITIVE_GAP_ROADMAP.md gap #6,
+# fixed as part of Phase 4 per docs/PHASE_STATUS.md's Phase 4 kickoff entry:
+# "Phase 4 is exactly when a document's company first resolves onto a
+# draft"). Phase 3's own mapper-time resolution still can't pass a `company`
+# for the very field that identifies the company itself (company_name) —
+# that one field is inherently unscoped, same as before.
+#
+# ponytail: the unscoped fallback still exists and can still pick an alias
+# belonging to a *different* company than the one requested, when no
+# company-scoped alias has been created yet for this normalized_value —
+# closing that fully needs either backfilling `company` onto every existing
+# alias row or dropping the fallback outright once real multi-company data
+# exists to test against; not done speculatively here.
 
 
 def normalize(raw_value: str) -> str:
@@ -34,14 +40,24 @@ def normalize(raw_value: str) -> str:
 	return value
 
 
-def resolve(entity_type: str, raw_value: str) -> dict | None:
+def resolve(entity_type: str, raw_value: str, company: str | None = None) -> dict | None:
 	"""Hit -> {"mapped_doctype", "mapped_docname"}. Miss -> None (left
 	unresolved for the review queue)."""
 	if not raw_value:
 		return None
+	normalized = normalize(raw_value)
+	if company:
+		match = frappe.db.get_value(
+			"Capture Alias",
+			{"entity_type": entity_type, "normalized_value": normalized, "company": company},
+			["mapped_doctype", "mapped_docname"],
+			as_dict=True,
+		)
+		if match:
+			return {"mapped_doctype": match.mapped_doctype, "mapped_docname": match.mapped_docname}
 	match = frappe.db.get_value(
 		"Capture Alias",
-		{"entity_type": entity_type, "normalized_value": normalize(raw_value)},
+		{"entity_type": entity_type, "normalized_value": normalized},
 		["mapped_doctype", "mapped_docname"],
 		as_dict=True,
 	)
@@ -50,7 +66,7 @@ def resolve(entity_type: str, raw_value: str) -> dict | None:
 	return {"mapped_doctype": match.mapped_doctype, "mapped_docname": match.mapped_docname}
 
 
-def resolve_extracted(raw_fields: dict, entity_type_by_field: dict[str, str]) -> dict:
+def resolve_extracted(raw_fields: dict, entity_type_by_field: dict[str, str], company: str | None = None) -> dict:
 	"""raw_fields: LLMParser.extract_fields()'s {dto_field: {"value", "confidence"}}.
 	entity_type_by_field: which of those dto_fields are Capture Alias-resolvable,
 	and under which entity_type. On a hit, confidence is raised to 1.0 and the
@@ -59,6 +75,6 @@ def resolve_extracted(raw_fields: dict, entity_type_by_field: dict[str, str]) ->
 	for dto_field, field_result in raw_fields.items():
 		entity_type = entity_type_by_field.get(dto_field)
 		value = field_result.get("value")
-		match = resolve(entity_type, value) if entity_type and value else None
+		match = resolve(entity_type, value, company) if entity_type and value else None
 		resolved[dto_field] = {**field_result, "confidence": 1.0, **match} if match else field_result
 	return resolved

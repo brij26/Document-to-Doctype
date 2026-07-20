@@ -21,7 +21,9 @@ class UnitTestSchema(UnitTestCase):
 
 		data = json.loads(dto.to_json())
 		self.assertEqual(data["target_doctype"], "Payment Entry")
-		self.assertEqual(data["fields"]["posting_date"], {"value": "2026-07-16", "confidence": 0.9})
+		self.assertEqual(
+			data["fields"]["posting_date"], {"value": "2026-07-16", "confidence": 0.9, "mapped_doctype": None, "mapped_docname": None}
+		)
 
 	def test_payment_entry_dto_with_no_fields_has_zero_confidence(self):
 		self.assertEqual(PaymentEntryDTO().confidence, 0.0)

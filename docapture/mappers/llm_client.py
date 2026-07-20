@@ -1,6 +1,7 @@
 # Copyright (c) 2026, Frappe Bench and contributors
 # For license information, please see license.txt
 
+import os
 from typing import Protocol, runtime_checkable
 
 import frappe
@@ -45,6 +46,16 @@ def get_parser() -> LLMParser:
 	from docapture.mappers.openai_client import OpenAIParser
 
 	return OpenAIParser()
+
+
+def resolve_api_key(config_key: str, env_var: str) -> str | None:
+	"""`bench --site <site> set-config <config_key> <key>` takes priority;
+	falls back to the process environment (e.g. an exported var ahead of
+	`bench start`/`bench worker`, or a loaded `.env` — see this file's
+	LangSmith tracing precedent) so an already-working env-var setup keeps
+	working with zero migration. Shared by openai_client.py/claude_client.py
+	so a vendor swap doesn't also mean reimplementing this lookup."""
+	return frappe.conf.get(config_key) or os.environ.get(env_var)
 
 
 def new_tracer() -> langsmith.Client:

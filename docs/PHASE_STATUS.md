@@ -14,19 +14,19 @@ Only set a phase to `Approved` after **explicit user sign-off** (see `CLAUDE.md`
 | 1 | Capture doctype + upload + status | Approved |
 | 2 | OCR layer (`ocr/*`) | Approved |
 | 3 | Mapper / LLM layer (`mappers/*`) | Awaiting Review |
-| 4 | Review queue + draft creation | Not Started |
+| 4 | Review queue + draft creation | Awaiting Review |
 | 5+ | Future (Should / Nice-to-Have) | Not Started |
 
 ---
 
 ## Current focus
 
-**Phase 3 — Awaiting Review.** Mapper / LLM layer (`mappers/*`) complete —
-`schema.py`, `layout.py`, `llm_client.py`/`claude_client.py`,
-`classifier.py`, both mappers' `FIELDS` + `build_dto`, `alias_resolver.py`,
-`pipeline.py`. All 4 `source_type` fixtures acquired and classifier
-calibrated against them. See `docs/PHASE_3_MAPPER_PLAN.md` for the full
-design rationale. Awaiting user sign-off before Phase 4.
+**Phase 4 — Awaiting Review.** Phase 3 stays `Awaiting Review` (unchanged,
+extraction/mapper layer untouched except the one disclosed cross-phase fix
+below). See the 2026-07-17 "Phase 4 build" log entry for the full summary,
+exit-criteria check, and disclosed design-principle bends. Stopping here for
+explicit user review before Tier 1 (docs/COMPETITIVE_GAP_ROADMAP.md) or
+anything else.
 
 ## Log
 
@@ -632,3 +632,381 @@ design rationale. Awaiting user sign-off before Phase 4.
   in `bank_statement_mapper.py`, no schema/doctype changes; latency on
   9-page documents was also raised by the user but explicitly marked "not
   a concern now," so left untouched.
+
+- **2026-07-17 (Phase 4 kickoff):** user asked for a strict competitive gap
+  audit against aiaccountant.com, scoped to bank statement/supplier
+  bill/expense voucher/payment receipt only (GST/Tally connector parity
+  explicitly out of scope) — written to
+  `docs/COMPETITIVE_GAP_ROADMAP.md`. Follow-up discussion pinned down
+  Phase 4's concrete bank-statement design: every transaction posts as a
+  Journal Entry (no Payment Entry split for now), and all transactions on
+  the same date share one JE (multi-row, one Bank+counterparty leg pair
+  per transaction, batched per date) rather than one JE per transaction.
+  This pulls two items the roadmap had filed under "Tier 1" (variable-length
+  JE rows, bank-statement multi-row splitting) forward into Phase 4 itself,
+  specifically for the Bank Statement source type. Supplier
+  Bill/Expense Voucher/Payment Receipt are unaffected — they stay
+  single-draft 2-row JE, matching Phase 4's original spec in
+  `docs/PHASED_DEVELOPMENT.md`. User said go. Phase 4 → In Progress.
+
+- **2026-07-17, Phase 4 build:** built review queue + draft creation for all
+  four source types.
+
+  **New files:** `docapture/dedup.py` (business-key lookup, scoped to
+  `Docapture Posting`'s own audit trail — never the general ledger),
+  `docapture/postings.py` (appends one `Docapture Posting` child row per
+  draft created or per dedup collision skipped), `docapture/router.py`
+  (whitelisted `approve()`/`reject()`, `source_type` → creator registry),
+  `docapture/notify.py` (bell-icon Notification Log to every System
+  Manager/Docapture Reviewer user on a pipeline failure — gap #10),
+  `docapture/creators/{accounts,fields,journal_entry_creator,
+  payment_entry_creator}.py`, new child doctype `Docapture Posting`
+  (`istable`, fields: target_doctype/target_docname/status/posting_date/
+  party/amount/reference/note) plus a `postings` Table field added to
+  `Captured Document`.
+
+  **journal_entry_mapper.py rewritten** (started as task 1, before the rest):
+  `FIELDS` now holds only header fields (posting_date/cheque_no/cheque_date);
+  a new `ROW_FIELDS` + `llm.extract_rows()` call (the same mechanism
+  `bank_statement_mapper.py` already used) replaces the old fixed
+  `row1_*/row2_*` convention — `JournalEntryDTO.rows` can now be any length.
+
+  **Bank Statement path:** `journal_entry_creator.create_grouped_by_date()`
+  groups `BankStatementDTO.transactions` by date; each date becomes one
+  Journal Entry with one Bank-leg + one counterparty-leg pair per
+  transaction (not one JE per transaction, not one JE for the whole
+  statement) — the exact shape the user specified. Dedup is checked
+  *per transaction*, before grouping, so a duplicate row is dropped rather
+  than silently merged into someone else's daily entry.
+
+  **Real ERPNext validation constraints discovered while building this**
+  (not knowable from the doctype JSON alone — found via actual `.insert()`
+  failures against real Journal Entry/Payment Entry validate() logic):
+  - `validate_party()` requires `party_type`+`party` together whenever a
+    row's account is a Receivable/Payable account — leaving `party` blank
+    to fall back to a bare control account (the original design) is not
+    actually postable. Fixed with a get-or-create placeholder Customer/
+    Supplier (`accounts.resolve_party()`, "Unidentified Depositor"/
+    "Unidentified Payee") when the counterparty never resolved to a real
+    record — the entry still posts, into an identifiable bucket a reviewer
+    can repoint, rather than failing outright or guessing a real party.
+  - `create_remarks()` requires `cheque_date` whenever `cheque_no` is set.
+    Defaulted to the entry's own `posting_date` when the LLM didn't extract
+    a separate reference date.
+  - Payment Entry's `set_missing_values()` requires `party_type`+`party`
+    unconditionally (non-Internal-Transfer) — same placeholder fix applies.
+
+  **Multi-company alias fix** (gap #6): `alias_resolver.resolve()`/
+  `resolve_extracted()` gained an optional `company` param — tries a
+  company-scoped `Capture Alias` match first, falls back to the old
+  unscoped lookup so existing single-company rows keep resolving with zero
+  migration. Threaded through all three mappers' `build_dto()` and
+  `mappers/pipeline.py` (passes `doc.company`). ponytail-flagged residual
+  gap in-code: the unscoped fallback can still pick a *different* company's
+  alias when no company-scoped one exists yet — full closure needs either
+  backfilling `company` onto every existing alias row or dropping the
+  fallback, neither done speculatively without real multi-company data.
+  This touches Phase 3 files while Phase 3 is `Awaiting Review` — sanctioned
+  by the roadmap itself ("Phase 4 is exactly when a document's company
+  first resolves onto a draft, so thread it through `alias_resolver.resolve()`
+  at this point").
+
+  **LLM key wiring** (gap #12): `llm_client.resolve_api_key(config_key,
+  env_var)` — `bench set-config` takes priority, falls back to the process
+  env (unchanged behavior when nothing's configured). Applied to both
+  `openai_client.py` (active default) and `claude_client.py` (kept in sync
+  for the same reason `docs/PHASE_3_MAPPER_PLAN.md` already gives for
+  maintaining both: it's the vendor-swap seam).
+
+  **Review queue UI:** `captured_document.js` gained Approve/Reject buttons
+  (visible to `Docapture Reviewer`/`System Manager` when `status == "In
+  Review"`) calling `docapture.router.approve`/`reject`. The "queue" itself
+  is the standard List View filtered to `status = "In Review"` — no custom
+  board built (YAGNI; native Frappe filtering already does this).
+
+  **Disclosed design-principle bends** (`docs/DESIGN_PRINCIPLES.md` "name it
+  in the checkpoint"):
+  - Dedup lives inside each creator (`journal_entry_creator.py`,
+    `payment_entry_creator.py`), not centrally in `router.py` as
+    `docs/ARCHITECTURE.md`'s "Router → Creator: dedup check... then create"
+    diagram implies. Bank Statement's per-transaction-before-grouping dedup
+    genuinely needs DTO-shape-specific knowledge (`docapture/dedup.py` and
+    `docapture/postings.py` stay the shared, doctype-agnostic primitives;
+    only the *decision of what counts as one business key* is creator-side).
+  - Creators are no longer pure "DTO → draft, nothing about extraction" —
+    they also call `docapture/dedup.py` and append `Docapture Posting` rows.
+    Still hold the actual non-negotiable (`ocr/`/`mappers/`/`creators/`
+    stay separated, DTO is the only cross-layer contract); the addition is
+    audit/dedup bookkeeping, not a leak of OCR/LLM internals.
+
+  **Checks:** `bench --site erpnext.yoursite.in run-tests --app docapture`
+  — 105/105 pass (51 unit + 54 integration; 23 new tests this pass:
+  `test_dedup.py`, `test_router.py`, `test_notify.py`,
+  `creators/test_journal_entry_creator.py`,
+  `creators/test_payment_entry_creator.py`, plus additions to
+  `test_journal_entry_mapper.py`/`test_alias_resolver.py`/
+  `test_llm_client.py`); `ruff check .` clean; `bench migrate` clean (new
+  `Docapture Posting` doctype + `Captured Document.postings` field synced).
+
+  **Exit criteria** (`docs/PHASED_DEVELOPMENT.md` Phase 4): "approve a
+  captured document → the correct Payment Entry or Journal Entry draft is
+  created, linked back, respects company/currency, and a duplicate is
+  blocked" — met and tested for all four source types, including the
+  date-grouped Bank Statement path (a deliberate scope expansion beyond the
+  original single-draft wording, per explicit user direction — see the
+  kickoff entry above and `docs/COMPETITIVE_GAP_ROADMAP.md`).
+
+  **Not done, flagged rather than silently skipped:** no manual Desk UI
+  walkthrough (upload → OCR → mapper → review → Approve button → posted
+  JE/PE) — same gap `docs/PHASE_STATUS.md` already flagged for Phase 3;
+  worth doing for real before this phase is approved, since it's the first
+  phase that writes to the ledger space. Bulk upload, failure-alert email
+  (vs. the bell-icon Notification Log actually built), and the remaining
+  Tier 1/2/3 roadmap items are unstarted by design — this phase stops at
+  Phase 4's own exit criteria.
+
+  Phase 4 → Awaiting Review. Stopping here for explicit user review before
+  continuing to any Tier 1 work.
+
+- **2026-07-20 (Phase 4 follow-up — amount-validation bug fix + Preview/
+  Correct feature):** user reported approving a Payment Receipt threw
+  `frappe.exceptions.ValidationError: Paid Amount is mandatory` from inside
+  `payment_entry_creator.create()`'s `pe.insert()`, and separately that they
+  had no way to see what would be created (or fix a wrong extracted value)
+  before Approve/Reject.
+
+  **Root cause:** when the LLM/OCR couldn't confidently read an amount,
+  `paid_amount` is `None`; `payment_entry_creator.py:58-59` silently coerced
+  that to `pe.paid_amount = paid_amount or 0`, and ERPNext's own
+  `validate_mandatory()` then threw its generic message with no trace back
+  to "docapture couldn't read this field." Same investigation found the
+  identical shape twice more in `journal_entry_creator.py`:
+  `_append_mapped_row` silently zero-filled a JE row's debit/credit (worse —
+  an all-zero row can balance and insert with no error at all), and
+  `create_grouped_by_date` silently dropped a bank-transaction row with an
+  unparseable date/amount (previously flagged in-code with a `ponytail:`
+  comment as a known gap).
+
+  **Fixed, all 3 sites:** `payment_entry_creator.create()` and
+  `journal_entry_creator._append_mapped_row()` now `frappe.throw()` a clear
+  docapture-level message (the row case names the 1-based row number)
+  instead of zero-coercing — `router.approve()`'s existing try/except
+  already turns this into `status="Failed"` + a readable `error_log`, no
+  router change needed. `create_grouped_by_date()` still skips an
+  unparseable row (one bad row among ~190 must not fail the whole
+  statement) but now collects skipped row numbers and `frappe.msgprint`s a
+  summary once, instead of dropping them with zero trace.
+
+  **Preview/Save Corrections feature:** new `docapture/review.py`
+  (`to_preview()`/`apply_corrections()`, pure functions, DTO-shape-agnostic
+  — branch on presence of `rows`/`transactions`, not `source_type`) plus two
+  new whitelisted `router.py` methods (`preview()`, `save_corrections()`,
+  same `_require_reviewer()` + status-guard shape as `approve()`/`reject()`).
+  A reviewer-edited value is written directly back into `extracted_json`
+  (`save_corrections()` → `doc.db_set`), confidence bumped to `1.0`, any
+  alias-resolved `mapped_docname` dropped (an edited value is no longer a
+  trusted link) — unchanged fields are left byte-for-byte alone.
+  `captured_document.js` gained a "Preview" button (same visibility guard as
+  Approve/Reject) opening one `frappe.ui.Dialog`: header fields as native
+  Dialog inputs, row/transaction DTOs (Journal Entry, Bank Statement) as a
+  hand-built HTML `<table>` of inputs inside an `HTML`-fieldtype Dialog
+  field, since no Table-fieldtype/Dialog precedent existed in this app.
+  Low-confidence fields (`confidence < 0.5`) get a visible hint/highlight.
+  "Save Corrections" posts to `save_corrections()`, then `frm.reload_doc()`.
+
+  **Design divergence, disclosed:** `docs/PHASE_4_REVIEW_UX_PLAN.md` already
+  contained a different, previously-confirmed design for this same
+  reviewer-correction problem (a persisted `Docapture Extracted Field` child
+  doctype, native always-visible Table grid, `extracted_json` staying
+  immutable) — never built. Explicitly surfaced to the user before writing
+  any code; user chose this session's Dialog-based design over the existing
+  doc's grid-based one. `PHASE_4_REVIEW_UX_PLAN.md` rewritten to mark itself
+  superseded and point at this entry, rather than left contradicting what
+  was actually built.
+
+  **Checks:** `bench --site erpnext.yoursite.in run-tests --app docapture` —
+  122/122 pass (56 unit + 66 integration; new: `test_review.py` (5),
+  3 new tests in `test_router.py` for `preview()`, 4 for
+  `save_corrections()`, 1 end-to-end correction→approve round-trip, 1 each
+  in `creators/test_payment_entry_creator.py`/
+  `creators/test_journal_entry_creator.py` for the amount-throw fix, 1 for
+  the bank-statement skip-surfacing fix); `ruff check .` clean; `bench
+  migrate` clean (no schema changes — `extracted_json` stays the existing
+  Long Text field, no new doctype).
+
+  **Not done, flagged rather than silently skipped:** no manual Desk
+  walkthrough of the Preview dialog across all 4 source types (no browser
+  automation available in this session) — the backend round-trip is
+  covered by an automated test, but the actual dialog rendering/editing
+  interaction has not been driven by a human yet. Also carried over,
+  unfixed, from the superseded plan doc: `journal_entry_creator.py`'s
+  `_append_mapped_row` uses the row's raw OCR `account` text instead of
+  `alias_docname(...)`, ignoring Capture Alias resolution — a real,
+  independent bug, explicitly out of scope for this pass.
+
+  Phase 4 stays `Awaiting Review` — same-phase fix (review feedback fixed
+  within the current phase, `CLAUDE.md` rule 3), not new scope. Stopping
+  here for explicit user review — please try the Preview button on a real
+  `In Review` capture (all 4 source types if possible) before this is
+  considered done.
+
+- **2026-07-20 (Phase 4 follow-up — bank-statement date forward-fill):**
+  user uploaded `Bank Statement Example Final.pdf` and asked whether
+  same-day transactions correctly group into one JE. Grouping logic itself
+  checked out fine, but inspecting the actual PDF text (PyMuPDF) surfaced a
+  separate real gap: this bank prints the date once per day, then lists
+  every same-day transaction below it with no date on that transaction's
+  own line. `layout.reconstruct_pages()` flattens OCR bands into
+  reading-order text, discarding table/column structure (same root cause
+  already documented for the withdrawal/deposit column-swap bug, follow-up
+  11) — a transaction row with no date anywhere near it in the flattened
+  text correctly gets `date: null` from `bank_statement_mapper`'s per-row
+  extraction, not an extraction bug. Downstream, `create_grouped_by_date()`
+  requires a parseable date to group a row at all, so these rows were being
+  skipped (silently before today's earlier fix, now surfaced via
+  `msgprint` but still dropped either way).
+
+  **Fixed:** `bank_statement_mapper.py` gained `_forward_fill_date()`, same
+  shape/placement as the existing `_correct_withdrawal_deposit()`
+  balance-carry correction — deterministic post-process, no LLM/OCR change,
+  called once from `build_dto()`. Carries the last-seen parseable date
+  forward onto any row missing one; a row before any date has been seen
+  yet is left alone. Forward-filled confidence is `0.4` — deliberately
+  below the Preview dialog's `<0.5` low-confidence threshold shipped
+  earlier today, so a forward-filled date automatically shows up flagged
+  for reviewer double-check with zero extra plumbing. Scope stays narrow:
+  only `date` is forward-filled, no evidence other row fields share this
+  layout problem. No changes needed outside this one file — DTO shape is
+  unchanged, so `journal_entry_creator.py`/`router.py`/Preview all pick it
+  up automatically.
+
+  **Checks:** `bench --site erpnext.yoursite.in run-tests --app docapture`
+  — 126/126 pass (56 unit + 70 integration; 4 new tests in
+  `test_bank_statement_mapper.py`); `ruff check .` clean; `bench migrate`
+  clean (no schema changes).
+
+  Phase 4 stays `Awaiting Review` — same-phase fix, not new scope.
+
+- **2026-07-20 (Phase 4 follow-up — reviewer can delete a bogus row in
+  Preview):** same PDF surfaced a second, unrelated gap — this bank's
+  statement opens with a "Balance brought forward" line, which
+  `bank_statement_mapper`'s per-row extraction has no way to distinguish
+  from a real transaction, so it comes through as a bogus `transactions`
+  row. Asked the user: auto-detect via a text heuristic ("balance b/f",
+  "opening balance", ...) or let the reviewer manually delete any row.
+  User picked manual delete — a heuristic is bank-phrasing whack-a-mole
+  (same trap as the date-forward-fill problem above), manual delete is
+  general and reuses the Preview/Correct feature already shipped.
+
+  **Fixed:** `review.apply_corrections()` now accepts an optional
+  `corrections["deleted_row_indices"]` (0-indexed into the original
+  `rows`/`transactions` list, same indexing `to_preview()` already uses)
+  and drops those rows from the returned list entirely, after field
+  corrections are applied. `captured_document.js`'s Preview dialog gained
+  a "Remove" button per row (`build_rows_table_html()`) that strikes/flags
+  a row client-side (undoable before Save); `save_preview_corrections()`
+  collects the flagged row indices and sends them alongside the existing
+  `header_fields`/`rows` payload. `router.save_corrections()` needed no
+  change — it already passes `corrections` straight through. Scope: row
+  deletion only (Journal Entry rows, Bank Statement transactions); a flat
+  (no-rows) document like Payment Receipt is still handled by the existing
+  Reject button, not touched here.
+
+  **Checks:** `bench --site erpnext.yoursite.in run-tests --app docapture`
+  — 129/129 pass (57 unit + 72 integration; 1 new test in
+  `test_review.py`, 2 new tests in `test_router.py`, one of which proves
+  the deletion isn't cosmetic — the undeleted bogus row makes `approve()`
+  throw outright since it has no debit/credit); `ruff check .` clean;
+  `bench migrate` clean (no schema changes).
+
+  Phase 4 stays `Awaiting Review` — same-phase fix, not new scope.
+
+- **2026-07-20 (Phase 4 follow-up — Capture Alias round-trip fix + clear
+  account-resolution errors + reviewer-assisted alias creation):** user hit
+  a raw `TypeError: sequence item 0: expected str instance, NoneType
+  found` (ERPNext's `journal_entry.py::set_against_account()`) approving a
+  Bank Statement JE. Tracing it surfaced three related bugs; user asked to
+  fix all three together.
+
+  **Root cause:** `alias_resolver.resolve_extracted()` has always
+  correctly returned `mapped_doctype`/`mapped_docname` on a Capture Alias
+  hit, but every mapper's `build_dto()` rebuilt each field as
+  `FieldValue(value=..., confidence=...)` — only 2 of the 4 keys, silently
+  dropping the other two before they ever reached `extracted_json`. This
+  predates this session and was untested. Consequence:
+  `creators/fields.py::alias_docname()` (read by
+  `journal_entry_creator.py`'s bank-leg resolution and
+  `payment_entry_creator.py`'s party resolution) always returned `None` —
+  a Capture Alias has never actually redirected a draft to its resolved
+  record, only cosmetically bumped confidence to `1.0`. Even if the user
+  had pre-created a Capture Alias for this statement's bank, it would
+  never have been used.
+
+  **Fixed (three parts):**
+  1. **Round-trip.** `mappers/schema.py`'s `FieldValue` gained
+     `mapped_doctype`/`mapped_docname` (optional, default `None`);
+     `_fields_to_json()` includes them. Every mapper's `build_dto()`
+     (`payment_entry_mapper.py`, `journal_entry_mapper.py`,
+     `bank_statement_mapper.py`) now stamps `mapped_doctype` from its
+     existing `_ENTITY_TYPE_BY_FIELD`/`_ROW_ENTITY_TYPE_BY_FIELD` map
+     whenever a dto_field is alias-eligible at all (hit or miss), and
+     `mapped_docname` from the resolver's result (hit only).
+  2. **A bug this unmasked.** `journal_entry_creator.py::_append_mapped_row()`
+     was using the row's raw OCR `account` text directly instead of
+     `alias_docname(...)` — flagged as a known-but-unfixed gap in this
+     session's earlier `PHASE_4_REVIEW_UX_PLAN.md` entry, now fixed
+     (`account = _alias_docname(row.get("account")) or _value(...)`,
+     mirroring `payment_entry_creator.py`'s existing pattern).
+  3. **Clear errors for what alias genuinely can't fix** — a Company with
+     no default Bank/Receivable/Payable account configured at all.
+     `payment_entry_creator.py::create()`, `journal_entry_creator.py::
+     create_grouped_by_date()`, and `_append_bank_transaction_legs()` now
+     throw a specific `frappe.throw()` before `.insert()` when
+     `bank_gl_account()`/`resolve_party()` returns no account, instead of
+     letting ERPNext's own `set_against_account()` crash with the raw
+     `TypeError`.
+
+  **Feature (user's suggestion):** rather than requiring the user to
+  pre-create every Capture Alias by hand and risk a `Failed` status if
+  they forget, the reviewer can now supply an unresolved alias-eligible
+  field directly in Preview and have it create the Capture Alias for
+  future documents. `review.py::to_preview()` passes `mapped_doctype`/
+  `mapped_docname` through per field; `_apply_field_corrections()` now
+  sets `mapped_docname` to a changed value when the field is
+  alias-eligible (trusting it as a Link pick) instead of always dropping
+  it; new pure function `review.py::new_aliases(extracted, updated)`
+  diffs before/after and returns alias-row specs for changed,
+  alias-eligible fields. `router.py::save_corrections()` upserts a
+  Capture Alias per spec — skipping any whose picked value isn't actually
+  a real record of that doctype (`frappe.db.exists()` check, since this
+  is client-supplied data), updating an existing conflicting alias rather
+  than erroring on it. `captured_document.js`'s Preview dialog renders an
+  alias-eligible header field as a native `Link` (`fieldtype`/`options`
+  swap on the existing Dialog field, no new plumbing) with a specific
+  "not mapped yet" hint when unresolved.
+
+  **Design-principle note:** `router.py` now imports
+  `mappers/alias_resolver.py::normalize()` — one pure string function, no
+  OCR/LLM coupling — to compute the same lookup key `resolve()` uses. This
+  bends `docs/DESIGN_PRINCIPLES.md`'s OCR/mappers-vs-creators separation
+  slightly; relocating one function into a new shared module for this felt
+  like ceremony, so it's disclosed here per CLAUDE.md's "bent principle"
+  rule instead.
+
+  **Scoped out (documented, not built):** Bank Statement transaction-row
+  `counterparty_name`'s Customer-vs-Supplier ambiguity, and
+  `payment_entry_mapper.py` always resolving `party_name` against
+  `Supplier` regardless of `party_type` — pre-existing limitations, same
+  shape as the already-documented "unscoped alias fallback can pick the
+  wrong company" note in `alias_resolver.py`. Row/transaction table cells
+  in Preview stay plain text (no Link autocomplete) — only Journal Entry
+  rows' `account` field is alias-eligible at row level in practice, and
+  the router's `frappe.db.exists()` check already makes a plain-text row
+  correction safe either way.
+
+  **Checks:** `bench --site erpnext.yoursite.in run-tests --app docapture`
+  — 150/150 pass (63 unit + 87 integration); `ruff check .` clean; `bench
+  migrate` clean (`FieldValue` is a plain dataclass, not a doctype — no
+  schema change).
+
+  Phase 4 stays `Awaiting Review` — same-phase fix, not new scope.

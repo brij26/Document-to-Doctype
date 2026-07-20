@@ -15,6 +15,11 @@ SCHEMA_VERSION = 1
 class FieldValue:
 	value: object
 	confidence: float
+	# Set whenever this dto_field is Capture Alias-eligible at all (hit or
+	# miss) — mapped_doctype present = alias-eligible, mapped_docname
+	# present = currently resolved to that record.
+	mapped_doctype: str | None = None
+	mapped_docname: str | None = None
 
 
 def overall_confidence(fields: dict[str, FieldValue]) -> float:
@@ -24,7 +29,15 @@ def overall_confidence(fields: dict[str, FieldValue]) -> float:
 
 
 def _fields_to_json(fields: dict[str, FieldValue]) -> dict:
-	return {name: {"value": fv.value, "confidence": fv.confidence} for name, fv in fields.items()}
+	return {
+		name: {
+			"value": fv.value,
+			"confidence": fv.confidence,
+			"mapped_doctype": fv.mapped_doctype,
+			"mapped_docname": fv.mapped_docname,
+		}
+		for name, fv in fields.items()
+	}
 
 
 @dataclass

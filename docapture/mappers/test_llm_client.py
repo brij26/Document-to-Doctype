@@ -31,3 +31,26 @@ class UnitTestGetParser(UnitTestCase):
 
 		with patch.dict("os.environ", _FAKE_ENV):
 			self.assertIsInstance(llm_client.get_parser(), ClaudeParser)
+
+
+class UnitTestResolveApiKey(UnitTestCase):
+	def tearDown(self):
+		frappe.conf.pop("openai_api_key", None)
+
+	def test_prefers_bench_config_over_env(self):
+		frappe.conf.openai_api_key = "from-config"
+
+		with patch.dict("os.environ", {"OPENAI_API_KEY": "from-env"}):
+			self.assertEqual(llm_client.resolve_api_key("openai_api_key", "OPENAI_API_KEY"), "from-config")
+
+	def test_falls_back_to_env_when_config_unset(self):
+		frappe.conf.pop("openai_api_key", None)
+
+		with patch.dict("os.environ", {"OPENAI_API_KEY": "from-env"}):
+			self.assertEqual(llm_client.resolve_api_key("openai_api_key", "OPENAI_API_KEY"), "from-env")
+
+	def test_none_when_neither_set(self):
+		frappe.conf.pop("openai_api_key", None)
+
+		with patch.dict("os.environ", {}, clear=True):
+			self.assertIsNone(llm_client.resolve_api_key("openai_api_key", "OPENAI_API_KEY"))
