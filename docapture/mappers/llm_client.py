@@ -32,6 +32,14 @@ class LLMParser(Protocol):
 		"""
 		...
 
+	def flush(self) -> None:
+		"""Flush the tracer's background send queue once. Callers (pipeline.py)
+		call this exactly once per job, after the last extract_fields()/
+		extract_rows() call — not after each call — see new_tracer()'s
+		docstring for why a flush is needed at all before the RQ worker
+		process exits."""
+		...
+
 
 def get_parser() -> LLMParser:
 	"""The one place pipeline.py/classifier.py get a concrete LLMParser —

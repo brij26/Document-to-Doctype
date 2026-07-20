@@ -45,10 +45,7 @@ class OpenAIParser:
 				}
 			},
 		)
-		result = json.loads(response.output_text)
-		if self._tracer:
-			self._tracer.flush()
-		return result
+		return json.loads(response.output_text)
 
 	def extract_rows(self, prompt_text: str, field_specs: list[FieldSpec]) -> list[dict[str, dict]]:
 		response = self._client.responses.create(
@@ -64,6 +61,8 @@ class OpenAIParser:
 			},
 		)
 		result = json.loads(response.output_text)
+		return result["rows"]
+
+	def flush(self) -> None:
 		if self._tracer:
 			self._tracer.flush()
-		return result["rows"]

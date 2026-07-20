@@ -33,6 +33,7 @@ def run_mapper(captured_document: str):
 	if doc.status != "OCR Done":
 		# Stale/duplicate enqueue, or the document moved on before this ran.
 		return
+	llm = None
 	try:
 		ocr_json = frappe.parse_json(doc.raw_ocr_json)
 		llm = llm_client.get_parser()
@@ -45,3 +46,6 @@ def run_mapper(captured_document: str):
 		error = traceback.format_exc()
 		doc.db_set({"error_log": error, "status": "Failed"}, notify=True)
 		notify.notify_failure(doc.name, error)
+	finally:
+		if llm is not None:
+			llm.flush()

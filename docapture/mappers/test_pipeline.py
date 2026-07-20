@@ -34,6 +34,9 @@ class _StubLLM:
 	def extract_rows(self, prompt_text, field_specs):
 		return []
 
+	def flush(self):
+		pass
+
 
 def _captured_document(dn, status="OCR Done", raw_ocr_json=_BANK_STATEMENT_OCR_JSON):
 	content = (FIXTURE_DIR / "input.jpg").read_bytes() + f"---test-marker:{dn}---".encode()

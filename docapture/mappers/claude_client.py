@@ -40,10 +40,7 @@ class ClaudeParser:
 			messages=[{"role": "user", "content": build_prompt(prompt_text, field_specs)}],
 		)
 		text = next(block.text for block in response.content if block.type == "text")
-		result = json.loads(text)
-		if self._tracer:
-			self._tracer.flush()
-		return result
+		return json.loads(text)
 
 	def extract_rows(self, prompt_text: str, field_specs: list[FieldSpec]) -> list[dict[str, dict]]:
 		response = self._client.messages.create(
@@ -56,6 +53,8 @@ class ClaudeParser:
 		)
 		text = next(block.text for block in response.content if block.type == "text")
 		result = json.loads(text)
+		return result["rows"]
+
+	def flush(self) -> None:
 		if self._tracer:
 			self._tracer.flush()
-		return result["rows"]
