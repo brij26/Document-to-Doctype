@@ -8,6 +8,10 @@
 # BankStatementDTO.transactions. Phase 4 groups same-date transactions into
 # one Journal Entry each (bank leg + counter-account leg per transaction),
 # not one Journal Entry per statement or per transaction.
+import concurrent.futures
+
+import frappe
+
 from docapture.mappers import alias_resolver, layout
 from docapture.mappers.llm_client import LLMParser
 from docapture.mappers.schema import BankStatementDTO, FieldValue
@@ -76,7 +80,25 @@ def build_dto(ocr_json: dict, llm: LLMParser, company: str | None = None) -> Ban
 	pages = layout.reconstruct_pages(ocr_json)
 	header_text = pages[0] if pages else ""
 
-	raw_fields = llm.extract_fields(header_text, FIELDS)
+	# extract_fields (header) and extract_rows (per page) are independent
+	# blocking HTTP calls to the LLM API — run them concurrently. Rows must
+	# still land in transactions in original page order regardless of which
+	# page's request happens to complete first, since _correct_withdrawal_deposit
+	# and _forward_fill_date both depend on document order — so futures are
+	# collected by (index, future) and resolved in index order, never via
+	# as_completed().
+	max_workers = frappe.conf.get("docapture_llm_row_workers", 8)
+	with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+		fields_future = executor.submit(llm.extract_fields, header_text, FIELDS)
+		row_futures = [
+			(index, executor.submit(llm.extract_rows, page_text, ROW_FIELDS))
+			for index, page_text in enumerate(pages)
+			if page_text.strip()
+		]
+
+		raw_fields = fields_future.result()
+		rows_by_page = sorted(((index, future.result()) for index, future in row_futures), key=lambda pair: pair[0])
+
 	resolved_fields = alias_resolver.resolve_extracted(raw_fields, _ENTITY_TYPE_BY_FIELD, company)
 	parent_fields = {
 		name: FieldValue(
@@ -89,10 +111,8 @@ def build_dto(ocr_json: dict, llm: LLMParser, company: str | None = None) -> Ban
 	}
 
 	transactions: list[dict[str, FieldValue]] = []
-	for page_text in pages:
-		if not page_text.strip():
-			continue
-		for raw_row in llm.extract_rows(page_text, ROW_FIELDS):
+	for _index, rows in rows_by_page:
+		for raw_row in rows:
 			transactions.append(_resolve_row(raw_row, company))
 
 	_correct_withdrawal_deposit(transactions)

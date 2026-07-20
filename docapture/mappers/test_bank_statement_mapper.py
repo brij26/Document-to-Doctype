@@ -1,6 +1,7 @@
 # Copyright (c) 2026, Frappe Bench and contributors
 # See license.txt
 
+import time
 from pathlib import Path
 
 import frappe
@@ -95,6 +96,41 @@ class IntegrationTestBankStatementMapper(IntegrationTestCase):
 		self.assertEqual(dto.transactions[0]["date"].value, "2025-12-01")
 		self.assertEqual(dto.transactions[1]["date"].value, "2025-12-02")
 		self.assertEqual(dto.transactions[2]["date"].value, "2025-12-03")
+
+	def test_transactions_preserve_page_order_even_when_pages_finish_out_of_order(self):
+		# Regression test for parallelizing extract_rows across a ThreadPoolExecutor:
+		# pages must be stitched back together by original page index, not by
+		# completion order. Page one sleeps longest, page three sleeps least, so
+		# if results were collected via as_completed() (completion order) instead
+		# of by index, page three's row would land first in dto.transactions --
+		# this test fails under that bug and only passes under the by-index fix.
+		ocr_json = {
+			"pages": [
+				{"lines": [{"text": "page one text", "bbox": [0, 0, 10, 10], "words": []}]},
+				{"lines": [{"text": "page two text", "bbox": [0, 0, 10, 10], "words": []}]},
+				{"lines": [{"text": "page three text", "bbox": [0, 0, 10, 10], "words": []}]},
+			]
+		}
+		sleep_by_page = {"page one text": 0.3, "page two text": 0.15, "page three text": 0.0}
+		rows_by_page = {
+			"page one text": [{"date": {"value": "2025-12-01", "confidence": 0.9}}],
+			"page two text": [{"date": {"value": "2025-12-02", "confidence": 0.9}}],
+			"page three text": [{"date": {"value": "2025-12-03", "confidence": 0.9}}],
+		}
+
+		class _SlowStubLLM(_StubLLM):
+			def extract_rows(self, prompt_text, field_specs):
+				time.sleep(sleep_by_page.get(prompt_text, 0.0))
+				return super().extract_rows(prompt_text, field_specs)
+
+		llm = _SlowStubLLM({}, rows_by_page=rows_by_page)
+
+		dto = build_dto(ocr_json, llm)
+
+		self.assertEqual(
+			[row["date"].value for row in dto.transactions],
+			["2025-12-01", "2025-12-02", "2025-12-03"],
+		)
 
 	def test_build_dto_skips_blank_pages(self):
 		ocr_json = {"pages": [{"lines": []}, _TWO_PAGE_OCR_JSON["pages"][0]]}
