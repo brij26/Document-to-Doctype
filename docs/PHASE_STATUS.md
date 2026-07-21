@@ -1010,3 +1010,319 @@ anything else.
   schema change).
 
   Phase 4 stays `Awaiting Review` — same-phase fix, not new scope.
+
+- **2026-07-21 (Phase 4 follow-up — Resolve Unknowns dialog + one-JE-per-row
+  + Employee/Internal Transfer party categories):** user feedback on the
+  existing Preview/Correction dialog — with a 190-row statement, resolving
+  unknown counterparties one row at a time is bad UX; wanted a dedicated
+  step, before Preview, that asks once per *distinct* unknown value instead
+  of once per row, plus a plain-language party-category picker (Customer/
+  Supplier/Employee/Internal Transfer) since the user has no Frappe/
+  accounting background. Also asked to revert the Phase 4 kickoff's
+  date-grouped Bank Statement design back to one Journal Entry per
+  transaction row, and to ask before silently skipping a flagged duplicate
+  instead of auto-rejecting it.
+
+  **New:** `docapture/resolve.py` — `unknowns_summary(doc)` (read-only;
+  dedups unresolved counterparties by exact text, flags forward-filled/
+  low-confidence dates, unreadable rows, and dedup-flagged rows, one entry
+  each regardless of row count), `alias_specs_from_resolutions()` and
+  `apply_resolutions()` (pure, same `extracted_json` dict shape
+  `docapture/review.py` already uses — a reviewer's answer is written
+  directly onto every row sharing that counterparty text, no re-querying
+  Capture Alias needed since the answer just given *is* the resolution).
+  Two new whitelisted `router.py` methods, `unknowns()`/`save_resolutions()`
+  (same `_require_reviewer()`/status-guard shape as `preview()`/
+  `save_corrections()`; `save_resolutions()` reuses the existing
+  `_save_new_aliases()` writer — same alias-spec shape `review.new_aliases()`
+  already produces). `captured_document.js` gained a "Resolve Unknowns"
+  button (Bank Statement only, shown before Preview) opening a dialog with
+  one section per unknown-kind found (skips a section entirely when there's
+  nothing of that kind); a "Skip" action goes straight to today's existing
+  Preview/Approve flow unchanged — this step is soft, not a hard gate.
+
+  **Party categories:** "Customer"/"Supplier" reuse the existing
+  `resolve_party()`/Capture Alias machinery unchanged. "Employee" is a real
+  ERPNext `Party Type` (confirmed via `frappe.get_all("Party Type")` against
+  this bench) — added to Capture Alias's `entity_type` Select options
+  (`capture_alias.json`); `get_party_account()` resolves it the same generic
+  way as any party type with a configured `Party Account` row, so an
+  unconfigured Employee still surfaces a clear error rather than crashing,
+  same as the existing Customer/Supplier/no-default-account path.
+  "Internal Transfer" isn't a party at all — a reviewer picks a plain
+  Account instead (reuses Capture Alias's existing `Account` `entity_type`,
+  no new option needed); `bank_statement_mapper.py`'s `_resolve_row()` now
+  special-cases an `Account`-typed alias hit into a new `counter_account`
+  DTO field instead of `party_type`/`party`, and `_PARTY_ENTITY_TYPES`
+  extended to `(Customer, Supplier, Employee, Account)` so a future document
+  with the same counterparty text auto-resolves too, not just this one.
+
+  **One JE per row:** `journal_entry_creator.create_grouped_by_date()`
+  renamed to `create_bank_entries()` and rewritten — JE creation moved
+  inside the existing per-row loop (previously a second loop over a
+  date-keyed `groups` dict), so every transaction row becomes its own
+  Journal Entry regardless of whether another row shares its date. Also
+  handles a `counter_account`-tagged row (the Internal Transfer case above)
+  by posting straight to that account with no party leg at all, and a
+  `force_create`-tagged row (a reviewer's "add anyway" on a flagged
+  duplicate, from `resolve.py`'s `duplicate_overrides`) by skipping the
+  `dedup.find_existing()` check instead of auto-rejecting.
+
+  **Exchange rate:** `Captured Document` gained an `exchange_rate` Float
+  field (document-level, not per-alias — statement currency is one thing
+  for the whole file), settable via the Resolve Unknowns dialog. Both
+  `create()` and `create_bank_entries()` now use `doc.exchange_rate` (falls
+  back to `1`, unchanged behavior when unset) instead of the previous
+  hardcoded `1`. **Real ERPNext constraint found via an actual `.insert()`
+  failure while testing this:** `JournalEntry.set_exchange_rate()` forces a
+  row's `exchange_rate` back to `1` whenever that row's account is already
+  in the company's own currency (correct — same-currency accounts can't
+  carry a real rate) and throws outright if a genuinely foreign-currency
+  account appears without `multi_currency = 1` set on the entry. Fixed by
+  setting `je.multi_currency = 1` whenever the resolved exchange_rate isn't
+  `1`. The rate only ever has a visible effect on a row whose account is
+  actually in a different currency than the company's.
+
+  **Design-principle note:** `docapture/resolve.py` touches `frappe.db`
+  (via `dedup.find_existing()`, `bank_gl_account()`) unlike
+  `docapture/review.py`, which is deliberately pure — kept as a separate
+  module rather than folded into `review.py` so that file's "no DB access"
+  contract stays true; `apply_resolutions()`/`alias_specs_from_resolutions()`
+  inside the new file are themselves still pure, same pattern as the
+  Preview feature's split.
+
+  **Checks:** `bench --site erpnext.yoursite.in run-tests --app docapture`
+  — 176/176 pass (73 unit + 103 integration; new: `test_resolve.py` — 10
+  unit tests for the pure `apply_resolutions()`/`alias_specs_from_resolutions()`
+  functions plus 6 integration tests for `unknowns_summary()`'s dedup/
+  flagging behavior; 6 new tests in `test_router.py` for `unknowns()`/
+  `save_resolutions()`; `test_journal_entry_creator.py`'s date-grouping test
+  replaced with a one-JE-per-row assertion, plus 3 new tests — exchange rate
+  on a genuinely foreign-currency leg, Internal Transfer posting with no
+  party, force-create bypassing dedup); `ruff check .` clean; `bench migrate`
+  clean (`Captured Document.exchange_rate` field, `Capture Alias.entity_type`
+  gained `Employee`).
+
+  **Not done, flagged rather than silently skipped:** no manual Desk
+  walkthrough of the new Resolve Unknowns dialog (no browser automation
+  available in this session) — the backend round-trip (`unknowns()` →
+  `save_resolutions()` → `approve()`) is covered by automated tests, but the
+  actual dialog rendering/interaction has not been driven by a human yet.
+  Party/account text inputs in the new dialog stay plain text, not Link/
+  awesomplete widgets — same simplification already accepted for row-level
+  fields in the existing Preview table; the server's `frappe.db.exists()`
+  check is the real safety net either way. "Unreadable rows" and "uncertain
+  dates" sections let a reviewer fill in a value per row but don't offer
+  batch-fill across identical narrations — not built speculatively without
+  evidence this case is common.
+
+  Phase 4 stays `Awaiting Review` — same-phase follow-up per explicit user
+  direction, not new unscoped work. Stopping here for explicit review before
+  anything else — please try the Resolve Unknowns button on a real Bank
+  Statement `In Review` capture (ideally the real UBI statement) before this
+  is considered done.
+
+- **2026-07-21 (Phase 4 follow-up — Preview dialog table UI too cramped):**
+  user shared a screenshot of the real UBI statement (CAP-00054, ~190 rows)
+  open in Preview — the modal had no `size` set (Bootstrap's narrow default,
+  ~600px) so the transaction table's 7+ columns were crammed into it: the
+  row-label cell ("Transaction 1") wrapped onto two lines, and values
+  (Reference No, Withdrawal, Balance) were visibly clipping inside their
+  inputs. Pre-existing gap from the Preview feature (2026-07-20 entry),
+  surfaced now on real multi-hundred-row data.
+
+  **Fixed, `captured_document.js` only:** `render_preview_dialog()`'s
+  `frappe.ui.Dialog` gained `size: "extra-large"` (`modal-xl`, confirmed
+  against `apps/frappe/frappe/public/js/frappe/ui/dialog.js:50`).
+  `build_rows_table_html()`'s row-label cell shortened from
+  `"{row_label} {n}"` to just `"#{n}"` — the row kind is already in the
+  dialog title, doesn't need repeating on every row. Added
+  `white-space: nowrap` on header cells and `min-width: 90px` on value
+  inputs so long values (a 6-7 digit balance, a long reference number) stop
+  clipping; the existing `table-responsive` wrapper still provides
+  horizontal scroll as the fallback. Same treatment applied to the newer
+  Resolve Unknowns dialog's tables (`build_parties_html`/`build_dates_html`/
+  `build_unreadable_html`/`build_dupes_html`) for consistency, via one
+  shared `.docapture-resolve-table` style block appended once in
+  `render_resolve_dialog()`.
+
+  Pure client-side markup/CSS change — no Python/doctype/test changes, not
+  exercised by `bench run-tests` (same as the 2026-07-16 follow-up 5
+  precedent for a client-only fix). **Not verified visually** — no browser
+  available in this session; confirmed only that the file still parses
+  (`node -e "new Function(fs.readFileSync(...))"`, syntax-only, not a
+  render check) and that `ruff check .` stays clean (no Python touched).
+  Needs a real look in the Desk UI before this can be called done.
+
+  Phase 4 stays `Awaiting Review` — same-phase fix.
+
+- **2026-07-21 (Phase 4 follow-up — Resolve Unknowns silently skipped rows
+  with no counterparty_name):** user tried Resolve Unknowns for real
+  (CAP-00057, first page of the UBI statement, 14 rows) and asked why only
+  "GAYATRI PRIVATE LIMITED" (4 rows) showed up when the statement clearly
+  has more distinct transactions. Checked the live `extracted_json`
+  directly: 10 of the 14 rows have `counterparty_name = None` at all — bare
+  bank reference codes ("TRF 201-54921", "AA5361070") or tax-payment
+  narrations ("ePAY/To:e-DIRECT TAX COLLE/...") — and `resolve.py`'s
+  `unknowns_summary()` only grouped by `counterparty_name`, so any row with
+  no name text had nothing to key on and silently never appeared.
+
+  **Fixed:** `resolve.py` gained `_row_identifier(row)` — `counterparty_name`
+  when present, else `narration`, else `reference_no` — used consistently in
+  `unknowns_summary()`'s grouping and `apply_resolutions()`'s row-matching
+  (previously keyed on `counterparty_name` alone in both places). A row
+  with no date/amount is excluded from this grouping entirely now (moved
+  after the existing unreadable-row check) — asking "who is this" is
+  premature until the date/amount question is answered first, and it was
+  briefly double-surfacing in both sections. `bank_statement_mapper.py`'s
+  `_resolve_row()` gained the same fallback — tries Capture Alias against
+  narration/reference_no when counterparty_name is empty — so an answer
+  given today auto-resolves the identical bank code on a future statement
+  too, the same promise already made for named counterparties. Also added
+  a 5th party category, **"Other (bank charge, tax, fee...)"**, alongside
+  "Internal Transfer" — both route to a plain Account
+  (`_ACCOUNT_ROUTED_CATEGORIES`), since real rows include tax/fee postings
+  that aren't a self-transfer either and a reviewer with no accounting
+  background shouldn't have to force one into the other's label.
+
+  **New tests:** `test_bank_statement_mapper.py` — 2 (narration-only row
+  resolves against an Account alias into `counter_account`, and against a
+  Customer alias into `party_type`/`party`); `test_resolve.py` — 4 (2 unit:
+  narration-keyed `apply_resolutions()` match, "Other" category routing; 2
+  integration: `unknowns_summary()` groups by narration when
+  `counterparty_name` is absent, and an unreadable row isn't also counted
+  in the counterparties list).
+
+  **Also fixed, found while re-running tests:** `test_build_dto_resolves_
+  known_bank_account_alias` (pre-existing, unrelated to this fix) used a
+  fixed literal account number with no salt, unlike every other test in
+  this suite — collided with itself across repeated runs. Salted like the
+  rest. Also caught, before committing to it: my first attempt at the two
+  new fallback tests reused the literal text `"TRF 201-54921"` for realism
+  — collided not with test leftovers but with **real data this site
+  already has** (the user's own live Capture Alias row from testing the
+  feature). Salted those too; a fixed literal that happens to resemble real
+  narration text is a collision risk against genuine data, not just other
+  test runs.
+
+  **Checks:** `bench --site erpnext.yoursite.in run-tests --app docapture`
+  — 182/182 pass (75 unit + 107 integration), stable across repeated runs;
+  `ruff check .` clean. No doctype/schema changes, no migrate needed.
+
+  Phase 4 stays `Awaiting Review` — same-phase fix.
+
+- **2026-07-21 (Phase 4 follow-up — Preview table columns misaligned after
+  Resolve Unknowns):** user screenshot of a real Preview dialog (CAP-00057)
+  showed stray unlabeled "Customer"/"XYZ" and "Supplier"/"ABC" cells
+  trailing off the end of some rows, not lined up under any column header.
+  Root cause: `build_rows_table_html()` built its header from `data.rows[0]`
+  only, but rows no longer share a uniform field set — Resolve Unknowns
+  writes `party_type`/`party` (or `counter_account`) onto only the specific
+  rows a reviewer actually answered, not every row, so a later row's extra
+  fields had no matching header column and rendered as trailing unlabeled
+  `<td>`s. Pre-existing latent bug (any row that happened to alias-resolve
+  differently from row 0 could already trigger it), just far more visible
+  now that Resolve Unknowns actively adds those fields to many rows.
+
+  **Fixed, `captured_document.js` only:** `build_rows_table_html()` now
+  unions every row's field names for the header (first-seen order) instead
+  of trusting row 0 alone, and looks up each row's cell by field name,
+  rendering a blank `<td>` (no input) wherever a given row doesn't have that
+  field — matches `review.py::_apply_field_corrections()`'s existing
+  behavior of silently dropping a correction for a field that row never had
+  in the first place, so an empty cell staying non-editable isn't a new
+  restriction. `save_preview_corrections()`'s submit-side reading logic
+  already iterated each row's own field list (not the header), so it needed
+  no change.
+
+  Also confirmed, on user request, that Resolve Unknowns answers really do
+  persist to Capture Alias: checked this site's live rows directly —
+  `CALIAS-00059` (TRF 201-54921 → Customer XYZ) and `CALIAS-00060` (TRF
+  312801010037001 → Supplier ABC), both `source: User Confirmed`, created
+  exactly when the user answered those two rows earlier in this session.
+
+  Pure client-side markup change — no Python/doctype/test changes, not
+  exercised by `bench run-tests`. **Not verified visually** — no browser
+  available in this session; confirmed only that the file parses and `ruff
+  check .` stays clean (no Python touched).
+
+  Phase 4 stays `Awaiting Review` — same-phase fix.
+
+- **2026-07-21 (Phase 4 follow-up — Resolve Unknowns "Who exactly?" becomes
+  a real Link search):** user feedback on the Resolve Unknowns dialog — once
+  a category (Customer/Supplier/...) is picked, the party picker should let
+  the reviewer search/select an existing record instead of typing an exact
+  name by hand, to cut human error (typo → a new placeholder-ish record
+  instead of the real one, or a picked value that doesn't exist at all and
+  gets silently dropped by `_save_new_aliases()`'s `frappe.db.exists()`
+  check with no feedback as to why).
+
+  **Fixed, `captured_document.js` only:** `build_parties_html()`'s "Who
+  exactly?" cell is now an empty container instead of a plain `<input>`.
+  New `bind_party_category_controls(dialog, company)` listens for the
+  category `<select>` changing and rebuilds that row's picker as a real
+  Frappe Link control (`frappe.ui.form.make_control`, `only_input: true` —
+  same construction `frappe/public/js/frappe/ui/filters/filter.js` uses for
+  its own dynamic-doctype field) targeting whichever doctype the category
+  maps to (`PARTY_CATEGORY_DOCTYPE`, mirrors `resolve.py`'s
+  `_ENTITY_TYPE_BY_CATEGORY` client-side) — native search-as-you-type
+  against real records, "Create a new ..." quick-entry included for free.
+  The control is destroyed and rebuilt on every category change rather than
+  having its `options` mutated in place, since the target doctype itself
+  changes each time. `Account`/`Employee` searches are filtered to the
+  capture's own `company` (`_COMPANY_SCOPED_DOCTYPES`) so a reviewer can't
+  pick a record belonging to a different company; `Customer`/`Supplier`
+  aren't company-scoped in ERPNext, so they get no filter, matching how
+  `resolve_party()` itself already treats them. `save_resolutions()` now
+  reads each row's answer via the control's `.get_value()` instead of a
+  plain `.val()`. Also excluded checkboxes from the `.docapture-resolve-
+  table` min-width CSS rule added in the previous entry — it was silently
+  stretching the "Add anyway" duplicate-row checkbox to 90px wide too.
+
+  Pure client-side change — no Python/doctype/test changes, not exercised
+  by `bench run-tests`. **Not verified visually** — no browser available in
+  this session; confirmed only that the file parses and `ruff check .`
+  stays clean.
+
+  Phase 4 stays `Awaiting Review` — same-phase fix.
+
+- **2026-07-21 (Phase 4 follow-up — pin LLM temperature=0 for extraction
+  consistency):** user re-ran the real UBI statement through the pipeline a
+  second time and found row 8 ("TRF 312801010037001", already resolved via
+  a saved alias) working fine, but a *different* row — row 11 ("eTXN/To:
+  312801010037001") — got `counterparty_name = "312801010037001"` this run
+  when it had been `None` the previous run, surfacing as a fresh unresolved
+  "unknown" the user hadn't seen before. Traced it to `openai_client.py`/
+  `claude_client.py` never setting `temperature` on either extraction call
+  at all — API default (non-zero) sampling applies, so an ambiguous call
+  ("is this bare digit string a counterparty name?") can legitimately
+  answer differently across two otherwise-identical runs of the same
+  document. Discussed whether row 8 and row 11 (same account number,
+  different narration wording) should be merged into one question — user
+  chose to keep them separate (safer; merging by embedded-number matching
+  risks wrongly conflating two genuinely different parties that happen to
+  share digits) — not built.
+
+  **Fixed:** `temperature=0` added to both `extract_fields()` and
+  `extract_rows()` in both `openai_client.py` and `claude_client.py` — a
+  structured-extraction call has no business sampling creatively; this
+  makes the model consistently pick its highest-probability answer instead.
+  Doesn't *guarantee* byte-identical output across runs (model-serving-level
+  noise can still exist even at temperature 0), but removes the deliberate
+  randomness that was the direct cause here. Model choice (gpt-4.1 vs.
+  another) was not the issue — this is a decoding-parameter gap, not a
+  capability gap, so switching models alone would not have fixed it.
+
+  **Also fixed, found while re-running tests:** a second, unrelated
+  pre-existing test-collision — `test_unresolved_counterparty_name_left_
+  unresolved` hardcoded the literal `"AA5360992"`, and the user's own live
+  testing had since created a real Capture Alias resolving that exact text
+  to Employee HR-EMP-00001, so the test's "stays unresolved" assertion
+  failed against real site data, not leftover test data. Salted like the
+  session's earlier fixes of the same shape.
+
+  **Checks:** `bench --site erpnext.yoursite.in run-tests --app docapture`
+  — 182/182 pass, stable across two consecutive runs; `ruff check .` clean.
+  No doctype/schema changes, no migrate needed.
+
+  Phase 4 stays `Awaiting Review` — same-phase fix.

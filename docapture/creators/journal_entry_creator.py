@@ -7,6 +7,7 @@
 # "D — Dependency Inversion").
 import frappe
 from frappe import _
+from frappe.utils import flt
 
 from docapture import dedup, postings
 from docapture.creators.accounts import bank_gl_account, resolve_party
@@ -49,8 +50,16 @@ def create(doc) -> bool:
 	# set (discovered via a real .insert() failure) — default to the
 	# posting date when the LLM didn't extract a separate reference date.
 	je.cheque_date = _value(dto["fields"].get("cheque_date")) or (je.posting_date if reference else None)
+	exchange_rate = flt(doc.get("exchange_rate")) or 1
+	# ERPNext's own set_exchange_rate() forces exchange_rate back to 1 for any
+	# row whose account is already in the company's own currency (correct —
+	# a same-currency row can't have a real rate) and throws outright if a
+	# foreign-currency row appears without this flag, discovered via a real
+	# .insert() failure while adding this.
+	if exchange_rate != 1:
+		je.multi_currency = 1
 	for row_number, row in enumerate(rows, start=1):
-		_append_mapped_row(je, row, row_number)
+		_append_mapped_row(je, row, row_number, exchange_rate)
 	je.insert()
 
 	doc.target_doctype = "Journal Entry"
@@ -68,14 +77,25 @@ def create(doc) -> bool:
 	return True
 
 
-def create_grouped_by_date(doc) -> bool:
-	"""Bank Statement path — every transaction posts as a Journal Entry, and
-	all transactions sharing a posting date share one JE (one Bank +
-	counterparty leg pair per transaction inside it), per explicit user
-	direction (docs/PHASE_STATUS.md Phase 4 kickoff entry), not one JE per
-	transaction. Dedup is checked per transaction, before grouping, so a
-	duplicate row never silently merges into someone else's daily entry.
-	Returns True if at least one draft was created."""
+def create_bank_entries(doc) -> bool:
+	"""Bank Statement path — one Journal Entry per transaction row (one Bank
+	+ counterparty leg pair each), per explicit user direction superseding
+	the earlier date-grouped design (docs/PHASE_STATUS.md). Dedup is checked
+	per row; a row the reviewer force-created over a flagged duplicate in the
+	Resolve Unknowns dialog (docapture/resolve.py's duplicate_overrides,
+	row["force_create"]) skips the check instead of being auto-rejected.
+	Returns True if at least one draft was created.
+
+	The whole per-row loop runs inside one savepoint: if row N throws (e.g.
+	no default Supplier account configured), rows 1..N-1 already had real
+	Journal Entries inserted, but router.approve()'s failure path only
+	db_sets status/error_log — it never persists this call's in-memory
+	Docapture Posting appends, so without this rollback those earlier JEs
+	would be real, un-audited postings a later retry (docapture/router.py's
+	retry()) would then duplicate, since dedup only checks the (unsaved,
+	lost) audit trail. Rolling back on any failure keeps this call
+	all-or-nothing — a Failed capture always has zero side effects to clean
+	up before it's safe to just retry from scratch."""
 	dto = frappe.parse_json(doc.extracted_json)
 	company = doc.company
 	bank_docname = _alias_docname(dto["fields"].get("account_no")) or _alias_docname(dto["fields"].get("bank_name"))
@@ -87,67 +107,84 @@ def create_grouped_by_date(doc) -> bool:
 			)
 		)
 
-	groups: dict[str, list[dict]] = {}
+	exchange_rate = flt(doc.get("exchange_rate")) or 1
 	skipped_rows: list[int] = []
-	for row_number, row in enumerate(dto.get("transactions") or [], start=1):
-		date = _value(row.get("date"))
-		_is_deposit, amount = _txn_direction_amount(row)
-		reference = _value(row.get("reference_no"))
-		party = _value(row.get("party")) or _value(row.get("counterparty_name"))
-		if not date or amount is None:
-			# ponytail: a row missing a parseable date/amount can't be keyed
-			# or grouped, so it's skipped rather than guessed at — surfaced to
-			# the reviewer via a msgprint below, not silent.
-			skipped_rows.append(row_number)
-			continue
+	created_any = False
+	save_point = frappe.generate_hash(length=10)
+	frappe.db.savepoint(save_point)
+	try:
+		for row_number, row in enumerate(dto.get("transactions") or [], start=1):
+			date = _value(row.get("date"))
+			_is_deposit, amount = _txn_direction_amount(row)
+			reference = _value(row.get("reference_no"))
+			party = _value(row.get("party")) or _value(row.get("counterparty_name"))
+			if not date or amount is None:
+				# ponytail: a row missing a parseable date/amount can't be keyed,
+				# so it's skipped rather than guessed at — surfaced to the
+				# reviewer via a msgprint below (and, before this point, via
+				# Resolve Unknowns' "unreadable rows" section), not silent.
+				skipped_rows.append(row_number)
+				continue
 
-		existing = dedup.find_existing(party=party, amount=amount, posting_date=date, reference=reference)
-		if existing:
+			force_create = bool(_value(row.get("force_create")))
+			existing = None if force_create else dedup.find_existing(party=party, amount=amount, posting_date=date, reference=reference)
+			if existing:
+				postings.append(
+					doc,
+					target_doctype=existing["target_doctype"],
+					target_docname=existing["target_docname"],
+					status="Rejected",
+					party=party,
+					amount=amount,
+					posting_date=date,
+					reference=reference,
+					note=f"Duplicate of existing {existing['target_doctype']} {existing['target_docname']}",
+				)
+				continue
+
+			je = frappe.new_doc("Journal Entry")
+			je.company = company
+			je.voucher_type = "Bank Entry"
+			je.posting_date = date
+			# ERPNext's own Journal Entry doctype marks cheque_no/cheque_date
+			# ("Reference Number"/"Reference Date" on the form) mandatory
+			# whenever voucher_type == "Bank Entry" — reference_no is already
+			# extracted per row, just falls back to narration/a synthesized
+			# value on the rare row that has neither, since the field can't
+			# be left blank regardless.
+			je.cheque_no = reference or _value(row.get("narration")) or f"BANK-{date}"
+			je.cheque_date = date
+			if exchange_rate != 1:
+				je.multi_currency = 1
+			_append_bank_transaction_legs(je, row, company, bank_account, exchange_rate)
+			je.insert()
+			created_any = True
 			postings.append(
 				doc,
-				target_doctype=existing["target_doctype"],
-				target_docname=existing["target_docname"],
-				status="Rejected",
+				target_doctype="Journal Entry",
+				target_docname=je.name,
+				status="Draft",
 				party=party,
 				amount=amount,
 				posting_date=date,
 				reference=reference,
-				note=f"Duplicate of existing {existing['target_doctype']} {existing['target_docname']}",
 			)
-			continue
-		groups.setdefault(date, []).append(row)
+	except Exception:
+		frappe.db.rollback(save_point=save_point)
+		raise
 
 	if skipped_rows:
 		frappe.msgprint(
-			_("Skipped {0} transaction row(s) with no parseable date/amount: row {1}. Use Preview to review and correct these before approving.").format(
+			_("Skipped {0} transaction row(s) with no parseable date/amount: row {1}. Use Resolve Unknowns or Preview to review and correct these before approving.").format(
 				len(skipped_rows), ", ".join(str(n) for n in skipped_rows)
 			),
 			indicator="orange",
 			alert=True,
 		)
-
-	created_any = False
-	for date in sorted(groups):
-		je = frappe.new_doc("Journal Entry")
-		je.company = company
-		je.voucher_type = "Bank Entry"
-		je.posting_date = date
-		for row in groups[date]:
-			_append_bank_transaction_legs(je, row, company, bank_account)
-		je.insert()
-		created_any = True
-		postings.append(
-			doc,
-			target_doctype="Journal Entry",
-			target_docname=je.name,
-			status="Draft",
-			posting_date=date,
-			note=f"{len(groups[date])} transaction(s)",
-		)
 	return created_any
 
 
-def _append_mapped_row(je, row: dict, row_number: int) -> None:
+def _append_mapped_row(je, row: dict, row_number: int, exchange_rate: float = 1) -> None:
 	debit = _amount(row.get("debit"))
 	credit = _amount(row.get("credit"))
 	if debit is None and credit is None:
@@ -177,13 +214,41 @@ def _append_mapped_row(je, row: dict, row_number: int) -> None:
 			"party": party,
 			"debit_in_account_currency": debit if debit is not None else 0,
 			"credit_in_account_currency": credit if credit is not None else 0,
-			"exchange_rate": 1,
+			"exchange_rate": exchange_rate,
 		},
 	)
 
 
-def _append_bank_transaction_legs(je, row: dict, company: str, bank_account: str | None) -> None:
+def _append_bank_transaction_legs(je, row: dict, company: str, bank_account: str | None, exchange_rate: float = 1) -> None:
 	is_deposit, amount = _txn_direction_amount(row)
+
+	je.append(
+		"accounts",
+		{
+			"account": bank_account,
+			"debit_in_account_currency": amount if is_deposit else 0,
+			"credit_in_account_currency": 0 if is_deposit else amount,
+			"exchange_rate": exchange_rate,
+			"user_remark": _value(row.get("narration")),
+		},
+	)
+
+	# A reviewer-picked "Internal Transfer" (docapture/resolve.py) means this
+	# row isn't a real counterparty at all — post straight to the picked
+	# account, no party_type/party.
+	counter_account_docname = _value(row.get("counter_account"))
+	if counter_account_docname:
+		je.append(
+			"accounts",
+			{
+				"account": counter_account_docname,
+				"debit_in_account_currency": 0 if is_deposit else amount,
+				"credit_in_account_currency": amount if is_deposit else 0,
+				"exchange_rate": exchange_rate,
+			},
+		)
+		return
+
 	resolved_party_type = _value(row.get("party_type"))
 	resolved_party = _value(row.get("party"))
 	# Direction decides the fallback party_type/account when the counterparty
@@ -202,22 +267,12 @@ def _append_bank_transaction_legs(je, row: dict, company: str, bank_account: str
 	je.append(
 		"accounts",
 		{
-			"account": bank_account,
-			"debit_in_account_currency": amount if is_deposit else 0,
-			"credit_in_account_currency": 0 if is_deposit else amount,
-			"exchange_rate": 1,
-			"user_remark": _value(row.get("narration")),
-		},
-	)
-	je.append(
-		"accounts",
-		{
 			"account": counter_account,
 			"party_type": party_type,
 			"party": party,
 			"debit_in_account_currency": 0 if is_deposit else amount,
 			"credit_in_account_currency": amount if is_deposit else 0,
-			"exchange_rate": 1,
+			"exchange_rate": exchange_rate,
 		},
 	)
 

@@ -127,6 +127,32 @@ class IntegrationTestRouter(IntegrationTestCase):
 		self.assertEqual(doc.status, "Rejected")
 		self.assertEqual(doc.error_log, "Blurry scan, re-upload")
 
+	def test_retry_resets_failed_to_in_review_and_clears_error_log(self):
+		doc = _captured_document("test-router-retry", status="Failed")
+		frappe.db.set_value("Captured Document", doc.name, "error_log", "Traceback: boom")
+
+		router.retry(doc.name)
+		doc.reload()
+
+		self.assertEqual(doc.status, "In Review")
+		self.assertEqual(doc.error_log, "")
+
+	def test_retry_rejects_when_not_failed(self):
+		doc = _captured_document("test-router-retry-wrong-status", status="In Review")
+
+		with self.assertRaises(frappe.ValidationError):
+			router.retry(doc.name)
+
+	def test_retry_blocked_without_reviewer_role(self):
+		doc = _captured_document("test-router-retry-no-role", status="Failed")
+
+		frappe.set_user("Guest")
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				router.retry(doc.name)
+		finally:
+			frappe.set_user("Administrator")
+
 	def test_preview_returns_shaped_fields_for_flat_shape(self):
 		doc = _captured_document(
 			"test-router-preview-flat", source_type="Payment Receipt", extracted=_payment_receipt_extracted()
@@ -313,6 +339,82 @@ class IntegrationTestRouter(IntegrationTestCase):
 				{"entity_type": "Account", "normalized_value": alias_resolver.normalize(raw_text), "mapped_docname": "Creditors - _TC"},
 			)
 		)
+
+	def test_unknowns_returns_empty_for_non_bank_statement_source_type(self):
+		doc = _captured_document("test-router-unknowns-not-bank")
+
+		self.assertEqual(router.unknowns(doc.name), {})
+
+	def test_unknowns_dedups_counterparty_for_bank_statement(self):
+		extracted = {
+			"fields": {"account_no": _field(None), "bank_name": _field(None)},
+			"transactions": [
+				{"date": _field("2026-07-01"), "deposit": _field("100"), "withdrawal": _field(None), "counterparty_name": _field("TRF 201-54921")},
+				{"date": _field("2026-07-02"), "deposit": _field("200"), "withdrawal": _field(None), "counterparty_name": _field("TRF 201-54921")},
+			],
+		}
+		doc = _captured_document("test-router-unknowns-bank", source_type="Bank Statement", extracted=extracted)
+		frappe.db.set_value("Company", _COMPANY, "default_bank_account", "Cash - _TC")
+
+		result = router.unknowns(doc.name)
+
+		self.assertEqual(result["counterparties"], [{"counterparty_name": "TRF 201-54921", "row_count": 2}])
+
+	def test_unknowns_blocked_without_reviewer_role(self):
+		doc = _captured_document("test-router-unknowns-no-role", source_type="Bank Statement", extracted={"fields": {}, "transactions": []})
+
+		frappe.set_user("Guest")
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				router.unknowns(doc.name)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_save_resolutions_creates_alias_and_applies_to_extracted_json(self):
+		extracted = {
+			"fields": {"account_no": _field(None), "bank_name": _field(None)},
+			"transactions": [{"date": _field("2026-07-01"), "deposit": _field("100"), "withdrawal": _field(None), "counterparty_name": _field("ABC Traders")}],
+		}
+		doc = _captured_document("test-router-save-resolutions", source_type="Bank Statement", extracted=extracted)
+		supplier_group = frappe.db.get_value("Supplier Group", {}, "name")
+		supplier = frappe.get_doc(
+			{"doctype": "Supplier", "supplier_name": f"Resolve Test Supplier {frappe.generate_hash(length=6)}", "supplier_group": supplier_group, "supplier_type": "Company"}
+		).insert()
+
+		router.save_resolutions(
+			doc.name,
+			json.dumps({"parties": [{"counterparty_name": "ABC Traders", "category": "Supplier", "party": supplier.name}]}),
+		)
+		doc.reload()
+
+		extracted_after = json.loads(doc.extracted_json)
+		self.assertEqual(extracted_after["transactions"][0]["party"], {"value": supplier.name, "confidence": 1.0})
+		self.assertTrue(
+			frappe.db.exists(
+				"Capture Alias",
+				{"entity_type": "Supplier", "normalized_value": alias_resolver.normalize("ABC Traders"), "mapped_docname": supplier.name},
+			)
+		)
+
+	def test_save_resolutions_sets_exchange_rate_on_document(self):
+		doc = _captured_document(
+			"test-router-save-resolutions-rate", source_type="Bank Statement", extracted={"fields": {}, "transactions": []}
+		)
+
+		router.save_resolutions(doc.name, json.dumps({"exchange_rate": 83.5}))
+		doc.reload()
+
+		self.assertEqual(doc.exchange_rate, 83.5)
+
+	def test_save_resolutions_blocked_without_reviewer_role(self):
+		doc = _captured_document("test-router-save-resolutions-no-role", source_type="Bank Statement", extracted={"fields": {}, "transactions": []})
+
+		frappe.set_user("Guest")
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				router.save_resolutions(doc.name, json.dumps({}))
+		finally:
+			frappe.set_user("Administrator")
 
 	def test_corrected_amount_flows_into_created_payment_entry(self):
 		extracted = _payment_receipt_extracted()

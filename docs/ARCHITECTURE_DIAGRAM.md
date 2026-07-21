@@ -2,9 +2,9 @@
 
 Component/data-flow view of the pipeline: how a document moves through the
 system. For the class-level view (modules, methods, per-phase namespaces)
-see `UML_DIAGRAM.md`. Same convention: solid = built, grey dashed = planned
-(Phase 4, not started). Snapshot, not auto-synced — regenerate by hand when
-the pipeline changes.
+see `UML_DIAGRAM.md`. Snapshot, not auto-synced — regenerate by hand when
+the pipeline changes. Every phase shown here is built (Phase 4 included);
+there is nothing left planned/dashed in this diagram.
 
 ```mermaid
 flowchart TD
@@ -37,15 +37,23 @@ flowchart TD
     PEMapper --> CD3[(Captured Document\nextracted_json, confidence\nstatus: In Review)]
     JEMapper --> CD3
 
-    subgraph Phase4["Review + Draft Creation — Phase 4, not started"]
-        CD3 -.-> ReviewQueue[Review Queue]
-        ReviewQueue -.-> Router[Router]
-        Router -.-> PECreator[payment_entry_creator]
-        Router -.-> JECreator[journal_entry_creator]
-        PECreator -.-> PE[ERPNext Payment Entry\ndocstatus=0 draft]
-        JECreator -.-> JE[ERPNext Journal Entry\ndocstatus=0 draft]
+    subgraph Phase4["Review + Draft Creation — Phase 4, built"]
+        CD3 --> ResolveGate{Bank Statement?}
+        ResolveGate -->|yes| ResolveUnknowns[Resolve Unknowns\nresolve.py — one question per\nunique unresolved counterparty\n/date/duplicate, not per row]
+        ResolveGate -->|no| Preview
+        ResolveUnknowns -->|saves Capture Alias\nanswers apply to extracted_json| Preview[Preview\nreview.py — per-field/row\ncorrection dialog]
+        Preview -->|Approve| Router[router.py\napprove\nsource_type -> creator]
+        Router --> Dedup[dedup.py\nDocapture Posting\nbusiness-key check]
+        Dedup --> PECreator[payment_entry_creator]
+        Dedup --> JECreator[journal_entry_creator\nBank Statement: one JE per row,\nwhole loop in one DB savepoint]
+        PECreator --> PE[ERPNext Payment Entry\ndocstatus=0 draft]
+        JECreator --> JE[ERPNext Journal Entry\ndocstatus=0 draft]
+        PECreator --> Postings[(Docapture Posting\naudit trail)]
+        JECreator --> Postings
+        Router -->|exception| Failed[(Captured Document\nstatus: Failed\nerror_log set)]
+        Failed -.->|Notify.notify_failure| Notify[Notification Log\nSystem Manager /\nDocapture Reviewer]
+        Failed -->|router.retry:\nstatus back to In Review,\nerror_log cleared,\nextracted_json untouched| ResolveGate
     end
 
-    classDef planned fill:#f5f5f5,stroke:#9e9e9e,stroke-dasharray: 5 5,color:#757575
-    class ReviewQueue,Router,PECreator,JECreator,PE,JE planned
+    style ResolveGate fill:#fff,stroke:#9e9e9e
 ```

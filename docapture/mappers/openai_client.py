@@ -35,6 +35,11 @@ class OpenAIParser:
 	def extract_fields(self, prompt_text: str, field_specs: list[FieldSpec]) -> dict[str, dict]:
 		response = self._client.responses.create(
 			model=MODEL,
+			# 0, not the API default — this is a structured-extraction call,
+			# not creative writing; sampling is exactly what makes an
+			# ambiguous field (e.g. "is this bare digit string a name?")
+			# answer differently across otherwise-identical runs.
+			temperature=0,
 			input=build_prompt(prompt_text, field_specs),
 			text={
 				"format": {
@@ -50,6 +55,7 @@ class OpenAIParser:
 	def extract_rows(self, prompt_text: str, field_specs: list[FieldSpec]) -> list[dict[str, dict]]:
 		response = self._client.responses.create(
 			model=MODEL,
+			temperature=0,
 			input=build_row_prompt(prompt_text, field_specs),
 			text={
 				"format": {

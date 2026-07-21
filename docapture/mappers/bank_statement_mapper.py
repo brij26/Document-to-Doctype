@@ -5,9 +5,9 @@
 # journal_entry_mapper (one document = a header + its own variable-length row
 # extraction), a bank statement is a table of an a-priori-unknown number of
 # transaction rows — this mapper extracts that table, one page at a time, into
-# BankStatementDTO.transactions. Phase 4 groups same-date transactions into
-# one Journal Entry each (bank leg + counter-account leg per transaction),
-# not one Journal Entry per statement or per transaction.
+# BankStatementDTO.transactions. journal_entry_creator.create_bank_entries()
+# turns each transaction into its own Journal Entry (bank leg + counter-
+# account leg), not one Journal Entry per statement or per date.
 import concurrent.futures
 
 import frappe
@@ -66,14 +66,20 @@ _ENTITY_TYPE_BY_FIELD = {
 	"account_no": "Bank Account",
 }
 
-# ponytail: counterparty_name is tried against Customer then Supplier, in that
-# fixed order, regardless of whether the row is a deposit or withdrawal.
-# ERPNext's own auto_match_party.py picks the trial order from the deposit/
-# withdrawal sign (Customer first for money in, Supplier first for money out)
-# — worth doing here too if this order causes real mismatches once Phase 4
-# starts creating Journal Entries; not done yet since there is no evidence
-# either way on real data.
-_PARTY_ENTITY_TYPES = ("Customer", "Supplier")
+# ponytail: counterparty_name is tried against Customer then Supplier then
+# Employee then Account, in that fixed order, regardless of whether the row
+# is a deposit or withdrawal. ERPNext's own auto_match_party.py picks the
+# trial order from the deposit/withdrawal sign (Customer first for money in,
+# Supplier first for money out) — worth doing here too if this order causes
+# real mismatches once Phase 4 starts creating Journal Entries; not done yet
+# since there is no evidence either way on real data.
+#
+# "Account" is not a party type — a reviewer picks it via the Resolve
+# Unknowns dialog for a row that isn't a real counterparty at all (a
+# self-transfer between the account holder's own accounts, a suspense/
+# clearing posting, ...). A hit here is handled specially in _resolve_row
+# (counter_account, not party_type/party).
+_PARTY_ENTITY_TYPES = ("Customer", "Supplier", "Employee", "Account")
 
 
 def build_dto(ocr_json: dict, llm: LLMParser, company: str | None = None) -> BankStatementDTO:
@@ -128,13 +134,40 @@ def _resolve_row(raw_row: dict, company: str | None) -> dict[str, FieldValue]:
 		confidence = result.get("confidence", 0.0)
 		if dto_field == "counterparty_name" and value:
 			match = _resolve_party(value, company)
+			if match and match["entity_type"] == "Account":
+				row["counterparty_name"] = FieldValue(value=value, confidence=1.0)
+				row["counter_account"] = FieldValue(value=match["mapped_docname"], confidence=1.0)
+				continue
 			if match:
 				row["counterparty_name"] = FieldValue(value=value, confidence=1.0)
 				row["party_type"] = FieldValue(value=match["entity_type"], confidence=1.0)
 				row["party"] = FieldValue(value=match["mapped_docname"], confidence=1.0)
 				continue
 		row[dto_field] = FieldValue(value=value, confidence=confidence)
+
+	# Many real rows have no counterparty_name at all — a bare bank reference
+	# code ("TRF 201-54921", "AA5361070") or a tax/fee narration with no
+	# identifiable third party — so counterparty_name alone never gets tried
+	# against Capture Alias above. Once a reviewer answers for one of these
+	# via the Resolve Unknowns dialog (docapture/resolve.py, keyed by the
+	# same narration/reference_no fallback text), this is what makes that
+	# answer auto-apply on the next document with the identical code too,
+	# not just the one already on screen.
+	if not (row.get("counterparty_name") and row["counterparty_name"].value):
+		fallback_text = _field_value(row.get("narration")) or _field_value(row.get("reference_no"))
+		if fallback_text:
+			match = _resolve_party(fallback_text, company)
+			if match and match["entity_type"] == "Account":
+				row["counter_account"] = FieldValue(value=match["mapped_docname"], confidence=1.0)
+			elif match:
+				row["party_type"] = FieldValue(value=match["entity_type"], confidence=1.0)
+				row["party"] = FieldValue(value=match["mapped_docname"], confidence=1.0)
+
 	return row
+
+
+def _field_value(fv: FieldValue | None) -> str | None:
+	return fv.value if fv is not None else None
 
 
 def _resolve_party(raw_value: str, company: str | None) -> dict | None:

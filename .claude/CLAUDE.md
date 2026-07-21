@@ -69,6 +69,14 @@ sites, not a single-app repo.
   `requirements.txt` if the app needs it), never installed loosely.
 - **Site commands always take `--site erpnext.yoursite.in`.**
 - **DB is MariaDB** — no Postgres-only SQL.
+- **Never run `bench run-tests` (or anything else that mutates data) against
+  `erpnext.yoursite.in`.** It's the real site the user does actual work on,
+  not a scratch site — Frappe's `IntegrationTestCase` rolls back its DB
+  transaction when a test class finishes, which wiped out a full session's
+  real uploads/aliases/Journal Entries the one time this was gotten wrong
+  (2026-07-21, docs/PHASE_STATUS.md). All test runs go against the
+  dedicated `docapture-test.localhost` site instead — see "Common commands"
+  below.
 
 ## Common commands
 
@@ -87,11 +95,14 @@ bench --site erpnext.yoursite.in backup
 bench new-app docapture
 bench --site erpnext.yoursite.in install-app docapture
 
-# Run tests for the app
-bench --site erpnext.yoursite.in run-tests --app docapture
+# One-time: dedicated test site (never run tests against erpnext.yoursite.in — see Hard constraints)
+bench new-site docapture-test.localhost --install-app docapture
+
+# Run tests for the app — always against the dedicated test site
+bench --site docapture-test.localhost run-tests --app docapture
 
 # Run a single test module
-bench --site erpnext.yoursite.in run-tests --module <dotted.module.path>
+bench --site docapture-test.localhost run-tests --module <dotted.module.path>
 
 # Build JS/CSS assets after frontend changes
 bench build

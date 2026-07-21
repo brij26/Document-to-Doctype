@@ -1,8 +1,9 @@
 # docapture — UML Class Diagram (by Phase)
 
-Generated from the codebase (`docapture/ocr/*`, doctypes) plus
-`PHASED_DEVELOPMENT.md` / `PHASE_STATUS.md`. Namespaces = phases. Solid
-boxes = built; grey dashed = planned (Phase 3/4, not started).
+Generated from the codebase (`docapture/ocr/*`, `docapture/mappers/*`,
+`docapture/creators/*`, `docapture/*.py`, doctypes) plus
+`PHASED_DEVELOPMENT.md` / `PHASE_STATUS.md`. Namespaces = phases. Every
+phase shown here (0 through 4) is built — nothing left planned/dashed.
 
 Regenerate by hand when a phase's code changes — this is a snapshot, not
 auto-synced.
@@ -32,6 +33,8 @@ classDiagram
             +source_type
             +raw_ocr_json
             +error_log
+            +exchange_rate
+            +postings
             +validate()
             +check_file_type()
             +set_content_hash()
@@ -151,11 +154,67 @@ classDiagram
         }
     }
 
-    %% Phase 4 -- Review queue + draft creation (Not Started)
+    %% Phase 4 -- Review queue + draft creation (Awaiting Review, built)
     namespace Phase4_ReviewDraft {
-        class router["router registry (planned)"]
-        class payment_entry_creator["payment_entry_creator (planned)"]
-        class journal_entry_creator["journal_entry_creator (planned)"]
+        class router_module["router.py"] {
+            +approve(captured_document)
+            +preview(captured_document) dict
+            +save_corrections(captured_document, corrections)
+            +unknowns(captured_document) dict
+            +save_resolutions(captured_document, resolutions)
+            +reject(captured_document, reason)
+            +retry(captured_document)
+            -_save_new_aliases(specs, company)
+            -_require_reviewer()
+        }
+        class review_module["review.py"] {
+            +to_preview(extracted) dict
+            +apply_corrections(extracted, corrections) dict
+            +new_aliases(extracted, updated) list
+        }
+        class resolve_module["resolve.py"] {
+            +unknowns_summary(doc) dict
+            +alias_specs_from_resolutions(extracted, resolutions) list
+            +apply_resolutions(extracted, resolutions) dict
+            -_row_identifier(row) str
+        }
+        class dedup_module["dedup.py"] {
+            +find_existing(party, amount, posting_date, reference) dict
+        }
+        class postings_module["postings.py"] {
+            +append(doc, target_doctype, target_docname, status, ...)
+        }
+        class notify_module["notify.py"] {
+            +notify_failure(docname, error)
+        }
+        class accounts_module["creators/accounts.py"] {
+            +resolve_party(party_type, party, company) tuple
+            +bank_gl_account(company, bank_account_docname) str
+        }
+        class fields_module["creators/fields.py"] {
+            +value(field_value)
+            +amount(field_value) float
+            +alias_docname(field_value) str
+        }
+        class payment_entry_creator_module["payment_entry_creator.py"] {
+            +create(doc) bool
+        }
+        class journal_entry_creator_module["journal_entry_creator.py"] {
+            +create(doc) bool
+            +create_bank_entries(doc) bool
+            -_append_mapped_row(je, row, row_number, exchange_rate)
+            -_append_bank_transaction_legs(je, row, company, bank_account, exchange_rate)
+        }
+        class DocapturePosting {
+            +target_doctype
+            +target_docname
+            +status
+            +party
+            +amount
+            +posting_date
+            +reference
+            +note
+        }
     }
 
     CapturedDocument --> CapturedDocumentStatus : status
@@ -192,13 +251,26 @@ classDiagram
     mapper_pipeline_module ..> journal_entry_mapper_module : Supplier Bill,\nExpense Voucher
     mapper_pipeline_module ..> CapturedDocument : reads raw_ocr_json,\nwrites extracted_json/confidence/status
 
-    router ..> payment_entry_creator : dispatch
-    router ..> journal_entry_creator : dispatch
-    payment_entry_creator ..> CapturedDocument : docstatus=0 draft
-    journal_entry_creator ..> CapturedDocument : docstatus=0 draft
+    router_module ..> review_module : preview / save_corrections
+    router_module ..> resolve_module : unknowns / save_resolutions\n(Bank Statement only)
+    router_module ..> payment_entry_creator_module : dispatch\n(Payment Receipt)
+    router_module ..> journal_entry_creator_module : dispatch\n(Bank Statement,\nSupplier Bill,\nExpense Voucher)
+    router_module ..> notify_module : notify_failure\non exception
+    router_module ..> CapturedDocument : load/save,\nstatus transitions\n(incl. Failed -> In Review\nvia retry())
 
-    classDef planned fill:#f5f5f5,stroke:#9e9e9e,stroke-dasharray: 5 5
-    class router planned
-    class payment_entry_creator planned
-    class journal_entry_creator planned
+    resolve_module ..> dedup_module : find_existing\n(read-only precheck)
+    resolve_module ..> accounts_module : bank_gl_account
+
+    payment_entry_creator_module ..> dedup_module : find_existing
+    payment_entry_creator_module ..> postings_module : append
+    payment_entry_creator_module ..> accounts_module : resolve_party,\nbank_gl_account
+    payment_entry_creator_module ..> fields_module : value, amount,\nalias_docname
+
+    journal_entry_creator_module ..> dedup_module : find_existing
+    journal_entry_creator_module ..> postings_module : append
+    journal_entry_creator_module ..> accounts_module : resolve_party,\nbank_gl_account
+    journal_entry_creator_module ..> fields_module : value, amount,\nalias_docname
+
+    postings_module ..> DocapturePosting : appends
+    CapturedDocument "1" *-- "many" DocapturePosting : postings (Table)
 ```

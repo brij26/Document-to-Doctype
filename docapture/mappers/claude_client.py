@@ -36,6 +36,11 @@ class ClaudeParser:
 		response = self._client.messages.create(
 			model=MODEL,
 			max_tokens=4096,
+			# 0, not the API default — structured extraction, not creative
+			# writing; sampling is exactly what makes an ambiguous field
+			# (e.g. "is this bare digit string a name?") answer differently
+			# across otherwise-identical runs.
+			temperature=0,
 			output_config={"format": {"type": "json_schema", "schema": build_schema(field_specs)}},
 			messages=[{"role": "user", "content": build_prompt(prompt_text, field_specs)}],
 		)
@@ -48,6 +53,7 @@ class ClaudeParser:
 			# Higher than extract_fields' 4096 — a bank statement page's table can
 			# run to dozens of rows, each with several fields.
 			max_tokens=8192,
+			temperature=0,
 			output_config={"format": {"type": "json_schema", "schema": build_row_schema(field_specs)}},
 			messages=[{"role": "user", "content": build_row_prompt(prompt_text, field_specs)}],
 		)

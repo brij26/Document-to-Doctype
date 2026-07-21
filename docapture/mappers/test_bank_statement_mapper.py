@@ -52,18 +52,22 @@ class IntegrationTestBankStatementMapper(IntegrationTestCase):
 		self.assertEqual(dto.fields["account_no"].value, "312805010077512")
 
 	def test_build_dto_resolves_known_bank_account_alias(self):
+		# Salted — tests here aren't transactionally rolled back
+		# (docs/PHASE_STATUS.md), so a fixed literal collides with a leftover
+		# Capture Alias row from a prior run of this same test.
+		account_no = f"3128050100{frappe.generate_hash(length=6)}"
 		frappe.get_doc(
 			{
 				"doctype": "Capture Alias",
 				"entity_type": "Bank Account",
-				"raw_value": "312805010077512",
-				"normalized_value": alias_resolver.normalize("312805010077512"),
+				"raw_value": account_no,
+				"normalized_value": alias_resolver.normalize(account_no),
 				"mapped_doctype": "Bank Account",
 				"mapped_docname": "Test Bank Account - UBI",
 				"source": "User Confirmed",
 			}
 		).insert(ignore_links=True)
-		llm = _StubLLM({"account_no": {"value": "312805010077512", "confidence": 0.6}})
+		llm = _StubLLM({"account_no": {"value": account_no, "confidence": 0.6}})
 
 		dto = build_dto(_TWO_PAGE_OCR_JSON, llm)
 
@@ -198,11 +202,17 @@ class IntegrationTestBankStatementMapper(IntegrationTestCase):
 		self.assertEqual(row["party"].value, supplier.name)
 
 	def test_unresolved_counterparty_name_left_unresolved(self):
+		# Salted, distinct-looking-from-any-real-bank-code text — a fixed
+		# literal that happens to resemble real narration text (this test
+		# used to hardcode "AA5360992") can collide with real Capture Alias
+		# rows this site's own live use of the feature has since created,
+		# not just leftover test data.
+		reference_code = f"TEST-UNRESOLVED-{frappe.generate_hash(length=8)}"
 		llm = _StubLLM(
 			{},
 			rows_by_page={
 				"page one text": [
-					{"counterparty_name": {"value": "AA5360992", "confidence": 0.2}}
+					{"counterparty_name": {"value": reference_code, "confidence": 0.2}}
 				]
 			},
 		)
@@ -210,10 +220,83 @@ class IntegrationTestBankStatementMapper(IntegrationTestCase):
 		dto = build_dto({"pages": [_TWO_PAGE_OCR_JSON["pages"][0]]}, llm)
 
 		row = dto.transactions[0]
-		self.assertEqual(row["counterparty_name"].value, "AA5360992")
+		self.assertEqual(row["counterparty_name"].value, reference_code)
 		self.assertEqual(row["counterparty_name"].confidence, 0.2)
 		self.assertNotIn("party_type", row)
 		self.assertNotIn("party", row)
+
+	def test_narration_resolves_via_alias_when_counterparty_name_is_missing(self):
+		# Many real rows have no counterparty_name at all — a bare bank
+		# reference code — so a Capture Alias saved against that narration
+		# text (docapture/resolve.py's Resolve Unknowns dialog) must still
+		# auto-resolve on the next document. Salted, distinct-looking-from-
+		# any-real-bank-code text — tests here aren't transactionally rolled
+		# back (docs/PHASE_STATUS.md) and this site also has real uploaded
+		# statements with their own Capture Alias rows; a fixed literal that
+		# happens to look like real narration text (e.g. "TRF 201-54921")
+		# can collide with genuine data, not just a leftover test row.
+		reference_code = f"TEST-REF-{frappe.generate_hash(length=8)}"
+		frappe.get_doc(
+			{
+				"doctype": "Capture Alias",
+				"entity_type": "Account",
+				"raw_value": reference_code,
+				"normalized_value": alias_resolver.normalize(reference_code),
+				"mapped_doctype": "Account",
+				"mapped_docname": "Cash - _TC",
+				"source": "User Confirmed",
+			}
+		).insert()
+		llm = _StubLLM(
+			{},
+			rows_by_page={
+				"page one text": [
+					{
+						"counterparty_name": {"value": None, "confidence": 0.0},
+						"narration": {"value": reference_code, "confidence": 0.9},
+					}
+				]
+			},
+		)
+
+		dto = build_dto({"pages": [_TWO_PAGE_OCR_JSON["pages"][0]]}, llm)
+
+		row = dto.transactions[0]
+		self.assertEqual(row["counter_account"].value, "Cash - _TC")
+		self.assertNotIn("party_type", row)
+		self.assertNotIn("party", row)
+
+	def test_narration_falls_back_to_customer_alias_when_counterparty_name_is_missing(self):
+		reference_code = f"TEST-REF-{frappe.generate_hash(length=8)}"
+		customer = frappe.get_doc({"doctype": "Customer", "customer_name": f"Narration Customer {frappe.generate_hash(length=6)}"}).insert()
+		frappe.get_doc(
+			{
+				"doctype": "Capture Alias",
+				"entity_type": "Customer",
+				"raw_value": reference_code,
+				"normalized_value": alias_resolver.normalize(reference_code),
+				"mapped_doctype": "Customer",
+				"mapped_docname": customer.name,
+				"source": "User Confirmed",
+			}
+		).insert()
+		llm = _StubLLM(
+			{},
+			rows_by_page={
+				"page one text": [
+					{
+						"counterparty_name": {"value": None, "confidence": 0.0},
+						"narration": {"value": reference_code, "confidence": 0.9},
+					}
+				]
+			},
+		)
+
+		dto = build_dto({"pages": [_TWO_PAGE_OCR_JSON["pages"][0]]}, llm)
+
+		row = dto.transactions[0]
+		self.assertEqual(row["party_type"].value, "Customer")
+		self.assertEqual(row["party"].value, customer.name)
 
 	def test_real_ubi_statement_extracts_one_page_of_transactions_per_pdf_page(self):
 		# Real 9-page fixture — proves extract_rows is called once per actual

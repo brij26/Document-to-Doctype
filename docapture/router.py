@@ -12,7 +12,7 @@ import traceback
 import frappe
 from frappe import _
 
-from docapture import notify, review
+from docapture import notify, resolve, review
 from docapture.creators import journal_entry_creator, payment_entry_creator
 
 # ponytail: pulling one pure string helper (normalize()) from mappers/ into
@@ -24,7 +24,7 @@ from docapture.mappers.alias_resolver import normalize as _normalize_alias_value
 
 _CREATE_BY_SOURCE_TYPE = {
 	"Payment Receipt": payment_entry_creator.create,
-	"Bank Statement": journal_entry_creator.create_grouped_by_date,
+	"Bank Statement": journal_entry_creator.create_bank_entries,
 	"Supplier Bill": journal_entry_creator.create,
 	"Expense Voucher": journal_entry_creator.create,
 }
@@ -117,12 +117,67 @@ def _save_new_aliases(specs: list, company: str | None) -> None:
 
 
 @frappe.whitelist()
+def unknowns(captured_document: str) -> dict:
+	"""Read-only Resolve Unknowns precheck (docapture/resolve.py) — Bank
+	Statement only, empty dict for every other source_type (their DTOs have
+	no variable-length row table to dedup-ask against)."""
+	_require_reviewer()
+	doc = frappe.get_doc("Captured Document", captured_document)
+	if doc.status != "In Review":
+		frappe.throw(_("Only an 'In Review' capture can be checked."))
+	if doc.source_type != "Bank Statement":
+		return {}
+	return resolve.unknowns_summary(doc)
+
+
+@frappe.whitelist()
+def save_resolutions(captured_document: str, resolutions: str) -> None:
+	"""`resolutions` — Resolve Unknowns dialog answers: {"bank_account",
+	"parties": [{"counterparty_name", "category", "party"}], "exchange_rate",
+	"row_fixes": [{"row_number", "date"?, "deposit"?, "withdrawal"?}],
+	"duplicate_overrides": [row_number, ...]}. Same alias-writing path as
+	save_corrections() (_save_new_aliases), so a resolved counterparty/bank
+	account auto-resolves on the next document too. Never touches doc.status."""
+	_require_reviewer()
+	doc = frappe.get_doc("Captured Document", captured_document)
+	if doc.status != "In Review":
+		frappe.throw(_("Only an 'In Review' capture can be corrected."))
+	resolutions = frappe.parse_json(resolutions)
+	extracted = frappe.parse_json(doc.extracted_json)
+
+	_save_new_aliases(resolve.alias_specs_from_resolutions(extracted, resolutions), doc.company)
+
+	updated = resolve.apply_resolutions(extracted, resolutions)
+	doc.db_set("extracted_json", json.dumps(updated), notify=True)
+	if resolutions.get("exchange_rate"):
+		doc.db_set("exchange_rate", resolutions["exchange_rate"], notify=True)
+
+
+@frappe.whitelist()
 def reject(captured_document: str, reason: str = ""):
 	_require_reviewer()
 	doc = frappe.get_doc("Captured Document", captured_document)
 	if doc.status != "In Review":
 		frappe.throw(_("Only an 'In Review' capture can be rejected."))
 	doc.db_set({"status": "Rejected", "error_log": reason}, notify=True)
+
+
+@frappe.whitelist()
+def retry(captured_document: str):
+	"""Sends a Failed capture back to the review queue without touching
+	extracted_json — every prior correction/Resolve Unknowns answer stays
+	exactly as it was, so the reviewer fixes whatever actually caused the
+	failure (e.g. a missing default account) and hits Approve again, instead
+	of re-uploading and re-paying for OCR/LLM extraction from scratch.
+	Safe to retry a Bank Statement specifically because
+	journal_entry_creator.create_bank_entries() rolls back to a savepoint on
+	any row failure — a Failed capture never has partial Journal Entries
+	sitting behind it for this to duplicate."""
+	_require_reviewer()
+	doc = frappe.get_doc("Captured Document", captured_document)
+	if doc.status != "Failed":
+		frappe.throw(_("Only a 'Failed' capture can be retried."))
+	doc.db_set({"status": "In Review", "error_log": ""}, notify=True)
 
 
 def _require_reviewer():
